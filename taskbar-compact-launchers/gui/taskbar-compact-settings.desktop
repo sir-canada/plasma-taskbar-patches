@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Taskbar Compact Settings
+GenericName=Taskbar Patch Configuration
+Comment=Configure the patched Plasma Task Manager (taskbar-compact.conf)
+Exec=taskbar-compact-settings
+Icon=preferences-system-windows
+Categories=Settings;DesktopSettings;Qt;KDE;
+Terminal=false

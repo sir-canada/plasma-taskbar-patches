@@ -1,0 +1,17 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = plasma-workspace
+Target = plasma-desktop
+
+[Action]
+Description = Scheduling automatic re-apply of the Plasma taskbar/tray patches
+When = PostTransaction
+# Must not block pacman: the service returns immediately and does the actual
+# rebuild after the transaction (it waits on /var/lib/pacman/db.lck, builds as
+# the owning user, installs as root, restarts plasmashell).
+#
+# Install this ONLY together with plasma-patches-auto and the unit -- see the
+# "Automatic re-apply" section of README.md.
+Exec = /usr/bin/systemctl start --no-block plasma-patches-rebuild.service

@@ -1,0 +1,6 @@
+# build trees / source tarballs pulled by rebuild.sh
+*/plasma-desktop-*/
+*/plasma-workspace-*/
+*.tar.xz
+*.so
+*.so.*

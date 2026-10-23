@@ -1,0 +1,70 @@
+diff --color -ruN a/applets/systemtray/main.xml b/applets/systemtray/main.xml
+--- a/applets/systemtray/main.xml	2026-07-11 19:30:10.448194018 +0300
++++ b/applets/systemtray/main.xml	2026-07-11 19:30:36.553905900 +0300
+@@ -37,6 +37,10 @@
+       <label>Whether to automatically scale System Tray icons to fix the available thickness of the panel. If false, tray icons will be capped at the smallMedium size (22px) and become a two-row/column layout when the panel is thick.</label>
+       <default>false</default>
+     </entry>
++    <entry name="useVerySmallIcons" type="bool">
++      <label>Whether to cap panel System Tray icons at the small size (16px) instead of smallMedium (22px) when not scaling icons to fit. Allows additional icon rows/columns in the same panel thickness.</label>
++      <default>false</default>
++    </entry>
+     <entry name="iconSpacing" type="int">
+       <label>spacing between icons, determined by this number multiplied by Kirigami.Units.smallSpacing</label>
+       <default>2</default>
+diff --color -ruN a/applets/systemtray/qml/ConfigGeneral.qml b/applets/systemtray/qml/ConfigGeneral.qml
+--- a/applets/systemtray/qml/ConfigGeneral.qml	2026-07-11 19:30:10.451491633 +0300
++++ b/applets/systemtray/qml/ConfigGeneral.qml	2026-07-11 19:31:20.144492264 +0300
+@@ -30,6 +30,7 @@
+     property bool unsavedChanges: !(changedVisibility.size === 0 && changedShortcuts.size === 0)
+ 
+     property bool cfg_scaleIconsToFit
++    property bool cfg_useVerySmallIcons
+     property int cfg_iconSpacing
+     property bool cfg_reverseIconOrder
+     property bool cfg_showAllItems
+@@ -214,6 +215,10 @@
+                 Layout.preferredWidth: formLayout.maxComboboxWidth
+                 model: [
+                     {
++                        "label": i18nc("@item:inlistbox Icon size", "Very small"),
++                        "size": "verySmall"
++                    },
++                    {
+                         "label": i18nc("@item:inlistbox Icon size", "Small"),
+                         "size": "small"
+                     },
+@@ -224,10 +229,11 @@
+                 ]
+                 textRole: "label"
+ 
+-                currentIndex: iconsPage.cfg_scaleIconsToFit ? 1 : 0
++                currentIndex: iconsPage.cfg_scaleIconsToFit ? 2 : (iconsPage.cfg_useVerySmallIcons ? 0 : 1)
+ 
+                 onActivated: index => {
+                     iconsPage.cfg_scaleIconsToFit = model[currentIndex]["size"] == "scale";
++                    iconsPage.cfg_useVerySmallIcons = model[currentIndex]["size"] == "verySmall";
+                 }
+             }
+ 
+diff --color -ruN a/applets/systemtray/qml/main.qml b/applets/systemtray/qml/main.qml
+--- a/applets/systemtray/qml/main.qml	2026-07-11 19:30:10.449909849 +0300
++++ b/applets/systemtray/qml/main.qml	2026-07-11 19:30:58.094195596 +0300
+@@ -190,13 +190,14 @@
+                 verticalLayoutDirection: (root.vertical && root.reverseLayout) ? GridView.BottomToTop : GridView.TopToBottom
+ 
+                 // The icon size to display when not using the auto-scaling setting
+-                readonly property int smallIconSize: Kirigami.Units.iconSizes.smallMedium
++                readonly property int smallIconSize: Plasmoid.configuration.useVerySmallIcons ? Kirigami.Units.iconSizes.small : Kirigami.Units.iconSizes.smallMedium
+ 
+                 readonly property bool autoSize: Plasmoid.configuration.scaleIconsToFit
+ 
+                 readonly property int gridThickness: root.vertical ? root.width : root.height
+-                // Should change to 2 rows/columns on a 56px panel (in standard DPI)
+-                readonly property int rowsOrColumns: autoSize ? 1 : Math.max(1, Math.min(count, Math.floor(gridThickness / (smallIconSize + Kirigami.Units.smallSpacing))))
++                // n rows/columns require n * smallIconSize + (n - 1) * smallSpacing: spacing only exists between rows/columns.
++                // Should change to 2 rows/columns on a 48px panel (in standard DPI)
++                readonly property int rowsOrColumns: autoSize ? 1 : Math.max(1, Math.min(count, Math.floor((gridThickness + Kirigami.Units.smallSpacing) / (smallIconSize + Kirigami.Units.smallSpacing))))
+ 
+                 // Add margins only if the panel is larger than a small icon (to avoid large gaps between tiny icons)
+                 readonly property int cellSpacing: Kirigami.Units.smallSpacing * Plasmoid.configuration.iconSpacing

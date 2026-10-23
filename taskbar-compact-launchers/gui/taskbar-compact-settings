@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+"""Taskbar Compact Settings — GUI for the patched Plasma Task Manager applet.
+
+Edits ~/.config/taskbar-compact.conf (read once by the applet at plasmashell
+start). Every option is an *override*: unchecked = key absent = the applet's
+built-in default. Applying stops plasmashell first (a live plasmashell rewrites
+the file on exit and would clobber the edit), writes, then restarts it.
+
+Dependency: pyside6 (Arch: sudo pacman -S pyside6).
+"""
+
+import os
+import subprocess
+import sys
+
+from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QColor, QFontDatabase
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox,
+    QFontComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox, QStatusBar,
+    QTabWidget, QVBoxLayout, QWidget,
+)
+
+SERVICE = "plasma-plasmashell.service"
+CONF_PATH = os.path.expanduser("~/.config/taskbar-compact.conf")
+
+WORKING_TOKENS = ["icon-pulse", "tint-pulse", "underline", "bevel", "edge-bar"]
+ATTENTION_TOKENS = ["fill", "flash", "two-stage", "underline", "bevel",
+                    "edge-bar", "none"]
+
+
+def svc_state(verb):
+    return subprocess.run(
+        ["systemctl", "--user", verb, SERVICE],
+        capture_output=True, text=True,
+    ).returncode == 0
+
+
+class Row:
+    """One optional override: enable-checkbox + editor widget."""
+
+    def __init__(self, key, label, widget, get_str, set_str, default_label, tip=""):
+        self.key = key
+        self.widget = widget
+        self.get_str = get_str
+        self.set_str = set_str
+        self.check = QCheckBox(label)
+        self.default_note = QLabel(f"default: {default_label}")
+        self.default_note.setStyleSheet("color: palette(mid); font-size: 8pt;")
+        if tip:
+            self.check.setToolTip(tip)
+            widget.setToolTip(tip)
+        self.check.toggled.connect(widget.setEnabled)
+        widget.setEnabled(False)
+
+    def field_widget(self):
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(1)
+        lay.addWidget(self.widget)
+        lay.addWidget(self.default_note)
+        return box
+
+    def load(self, settings):
+        if settings.contains(self.key):
+            raw = settings.value(self.key)
+            if isinstance(raw, (list, tuple)):  # QSettings comma-list
+                raw = ",".join(str(x) for x in raw)
+            self.check.setChecked(True)
+            self.set_str(str(raw))
+        else:
+            self.check.setChecked(False)
+
+    def store(self, settings):
+        if self.check.isChecked():
+            settings.setValue(self.key, self.get_str())
+        else:
+            settings.remove(self.key)
+
+
+def spin_row(key, label, lo, hi, default, step=1, suffix="", tip=""):
+    w = QSpinBox()
+    w.setRange(lo, hi)
+    w.setSingleStep(step)
+    w.setValue(default if isinstance(default, int) else lo)
+    if suffix:
+        w.setSuffix(suffix)
+    return Row(key, label, w, lambda: str(w.value()),
+               lambda s: w.setValue(int(float(s))), str(default) + suffix, tip)
+
+
+def dspin_row(key, label, lo, hi, default, step=0.5, decimals=2, tip=""):
+    w = QDoubleSpinBox()
+    w.setRange(lo, hi)
+    w.setSingleStep(step)
+    w.setDecimals(decimals)
+    w.setValue(default if isinstance(default, (int, float)) else lo)
+    return Row(key, label, w, lambda: f"{w.value():g}",
+               lambda s: w.setValue(float(s)), str(default), tip)
+
+
+def combo_row(key, label, options, default, tip=""):
+    w = QComboBox()
+    w.addItems(options)
+    w.setCurrentText(default)
+
+    def set_str(s):
+        w.setCurrentText(s if s in options else default)
+    return Row(key, label, w, w.currentText, set_str, default, tip)
+
+
+def bool_row(key, label, default, tip=""):
+    w = QComboBox()
+    w.addItems(["true", "false"])
+    w.setCurrentText("true" if default else "false")
+    return Row(key, label, w, w.currentText,
+               lambda s: w.setCurrentText("true" if s.lower() in ("true", "1") else "false"),
+               "true" if default else "false", tip)
+
+
+def font_row(key, label, tip=""):
+    w = QFontComboBox()
+    return Row(key, label, w, lambda: w.currentFont().family(),
+               lambda s: w.setCurrentText(s), "theme font family", tip)
+
+
+class ColorRowWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.edit = QLineEdit()
+        self.edit.setPlaceholderText("#RRGGBB or named color")
+        btn = QPushButton("Pick…")
+        btn.clicked.connect(self._pick)
+        lay.addWidget(self.edit)
+        lay.addWidget(btn)
+        self.edit.textChanged.connect(self._tint)
+
+    def _pick(self):
+        cur = QColor(self.edit.text()) if self.edit.text() else QColor("#ff8800")
+        c = QColorDialog.getColor(cur, self, "Pick color")
+        if c.isValid():
+            self.edit.setText(c.name())
+
+    def _tint(self, text):
+        c = QColor(text)
+        self.edit.setStyleSheet(
+            f"QLineEdit {{ border-bottom: 3px solid {c.name()}; }}" if c.isValid() and text else "")
+
+
+def color_row(key, label, default_label, tip=""):
+    w = ColorRowWidget()
+    return Row(key, label, w, lambda: w.edit.text().strip(),
+               lambda s: w.edit.setText(s), default_label, tip)
+
+
+class WorkingVisualWidget(QWidget):
+    """Comma-list multi-select of working visuals; empty selection = none."""
+
+    def __init__(self):
+        super().__init__()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.checks = {}
+        for tok in WORKING_TOKENS:
+            cb = QCheckBox(tok)
+            self.checks[tok] = cb
+            lay.addWidget(cb)
+
+    def get_str(self):
+        sel = [t for t, cb in self.checks.items() if cb.isChecked()]
+        return ",".join(sel) if sel else "none"
+
+    def set_str(self, s):
+        toks = [t.strip() for t in s.split(",")]
+        for t, cb in self.checks.items():
+            cb.setChecked(t in toks)
+
+
+def group(title, rows):
+    g = QGroupBox(title)
+    form = QFormLayout(g)
+    form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+    for r in rows:
+        form.addRow(r.check, r.field_widget())
+    return g
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Taskbar Compact Settings")
+        self.rows = []
+        tabs = QTabWidget()
+
+        tabs.addTab(self._tab_font(), "Label && Font")
+        tabs.addTab(self._tab_visuals(), "State Visuals")
+        tabs.addTab(self._tab_timing(), "Timing")
+        tabs.addTab(self._tab_behavior(), "Behavior")
+
+        btn_apply = QPushButton("Apply (restarts panel)")
+        btn_apply.setDefault(True)
+        btn_apply.clicked.connect(self.apply)
+        btn_save = QPushButton("Save only")
+        btn_save.setToolTip(
+            "Write the file without restarting plasmashell.\n"
+            "WARNING: a running plasmashell rewrites this file on its next exit,\n"
+            "which can clobber the saved values. Prefer Apply.")
+        btn_save.clicked.connect(self.save_only)
+        btn_reload = QPushButton("Reload file")
+        btn_reload.clicked.connect(self.load)
+        btn_defaults = QPushButton("All defaults")
+        btn_defaults.setToolTip("Uncheck every override (applet built-in defaults).")
+        btn_defaults.clicked.connect(self.clear_all)
+
+        btns = QHBoxLayout()
+        btns.addWidget(btn_defaults)
+        btns.addWidget(btn_reload)
+        btns.addStretch(1)
+        btns.addWidget(btn_save)
+        btns.addWidget(btn_apply)
+
+        central = QWidget()
+        lay = QVBoxLayout(central)
+        note = QLabel(
+            f"Overrides for <code>{CONF_PATH}</code> — unchecked = applet default. "
+            "The applet reads the file once at plasmashell start.")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        lay.addWidget(tabs, 1)
+        lay.addLayout(btns)
+        self.setCentralWidget(central)
+        self.setStatusBar(QStatusBar())
+        self.load()
+
+    # -- tabs ---------------------------------------------------------------
+
+    def _reg(self, rows):
+        self.rows += rows
+        return rows
+
+    def _tab_font(self):
+        font_rows = self._reg([
+            font_row("fontFamily", "Font family",
+                     "Task-button label font family."),
+            dspin_row("fontPointSize", "Point size (min)", 4, 72, 7.5, 0.5, 1,
+                      "Label point size; also the minimum when adaptive sizing is on.\n"
+                      "Applet default: max(6, 0.65 × theme size)."),
+        ])
+        adaptive_rows = self._reg([
+            dspin_row("fontPointSizeMax", "Max point size", 0, 72, 0, 0.5, 1,
+                      "Adaptive sizing upper bound. 0 or ≤ min = adaptive sizing OFF."),
+            dspin_row("fontAutoStepPt", "Quantize step (pt)", 0.1, 5, 0.5, 0.1, 1),
+            spin_row("fontAutoDebounceMs", "Debounce", 0, 10000, 500, 100, " ms"),
+            combo_row("fontAutoAggregate", "Aggregate", ["mean", "min"], "mean",
+                      "min: any truncating title pins the size at the minimum."),
+            dspin_row("fontAutoHysteresisPt", "Hysteresis (pt)", 0, 10, 0, 0.5, 1,
+                      "Suppress size hops smaller than this."),
+        ])
+        marquee_rows = self._reg([
+            spin_row("marqueeSpeed", "Scroll speed", 1, 500, 60, 5, " px/s"),
+            spin_row("marqueeDelayMs", "Start delay", 0, 5000, 400, 50, " ms",
+                     "0 = scroll starts the instant the pointer hovers."),
+        ])
+        return self._page([group("Label font", font_rows),
+                           group("Adaptive label sizing", adaptive_rows),
+                           group("Hover marquee", marquee_rows)])
+
+    def _tab_visuals(self):
+        wv = WorkingVisualWidget()
+        working_row = Row("workingVisual", "Working visuals", wv,
+                          wv.get_str, wv.set_str, "icon-pulse",
+                          "Drawn while a task is busy (Claude Code spinner title). "
+                          "Any combination; none selected = none.")
+        rows = self._reg([
+            working_row,
+            combo_row("attentionVisual", "Attention visual", ATTENTION_TOKENS,
+                      "fill",
+                      "Drawn when work finished while the window was unfocused "
+                      "(cleared on activation)."),
+            color_row("workingColor", "Working color", "theme highlight",
+                      "Base color for working visuals (icon-pulse unaffected). "
+                      "Empty = theme."),
+            color_row("attentionColor", "Attention color", "theme neutral (orange)",
+                      "Base color for attention visuals. Empty = theme."),
+            bool_row("bevelBreathe", "Bevel breathes", True,
+                     "Whether the bevel working visual pulses its brightness."),
+            spin_row("fillRadius", "Fill corner radius", 0, 10, 3, 1, " px",
+                     "0 = square corners."),
+        ])
+        return self._page([group("Busy / done state visuals", rows)])
+
+    def _tab_timing(self):
+        rows = self._reg([
+            spin_row("pulsePeriodMs", "Working pulse period", 100, 60000, 1600,
+                     100, " ms"),
+            dspin_row("pulseDim", "Icon-pulse dim opacity", 0.05, 0.95, 0.45, 0.05),
+            spin_row("pulseSteps", "Pulse smoothness (steps)", 2, 60, 16, 2, "",
+                     "Ticks per cycle. 2 = hard blink, higher = smoother."),
+            spin_row("flashPeriodMs", "Attention flash period", 100, 60000, 2400,
+                     100, " ms"),
+            spin_row("attentionIntroMs", "Two-stage intro", 0, 60000, 5000, 500,
+                     " ms", "0 = skip intro, straight to latch pulse."),
+            spin_row("attentionLatchPeriodMs", "Two-stage latch period", 200,
+                     60000, 3000, 100, " ms"),
+        ])
+        return self._page([group("Animation timing", rows)])
+
+    def _tab_behavior(self):
+        rows = self._reg([
+            bool_row("wheelVolume", "Wheel = system volume", False,
+                     "Mouse wheel anywhere over the taskbar changes default-sink "
+                     "volume (Shift = fine step)."),
+        ])
+        return self._page([group("Behavior", rows)])
+
+    def _page(self, groups):
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
+        for g in groups:
+            lay.addWidget(g)
+        lay.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(inner)
+        return scroll
+
+    # -- file / service ops -------------------------------------------------
+
+    def _settings(self):
+        return QSettings(CONF_PATH, QSettings.IniFormat)
+
+    def load(self):
+        s = self._settings()
+        for r in self.rows:
+            r.load(s)
+        self.statusBar().showMessage(
+            f"Loaded {CONF_PATH}" if os.path.exists(CONF_PATH)
+            else "No config file yet — everything at applet defaults.", 5000)
+
+    def clear_all(self):
+        for r in self.rows:
+            r.check.setChecked(False)
+        self.statusBar().showMessage("All overrides cleared (not yet saved).", 5000)
+
+    def _write(self):
+        s = self._settings()
+        for r in self.rows:
+            r.store(s)
+        s.sync()
+        return s.status() == QSettings.NoError
+
+    def save_only(self):
+        if svc_state("is-active"):
+            if QMessageBox.warning(
+                    self, "plasmashell is running",
+                    "plasmashell is running and will rewrite this file on its "
+                    "next exit, possibly clobbering these values.\n\nSave anyway?",
+                    QMessageBox.Save | QMessageBox.Cancel) != QMessageBox.Save:
+                return
+        ok = self._write()
+        self.statusBar().showMessage(
+            "Saved. Restart plasmashell to apply." if ok else "WRITE FAILED.", 8000)
+
+    def apply(self):
+        running = svc_state("is-active")
+        if running:
+            if QMessageBox.question(
+                    self, "Restart panel?",
+                    "Applying stops and restarts plasmashell — the panel and "
+                    "desktop will blink for a moment.\n\nProceed?",
+                    QMessageBox.Yes | QMessageBox.Cancel) != QMessageBox.Yes:
+                return
+            if not svc_state("stop"):
+                QMessageBox.critical(self, "Error", "Failed to stop plasmashell.")
+                return
+        ok = self._write()
+        if running:
+            started = svc_state("start")
+        else:
+            started = True
+        if not ok:
+            QMessageBox.critical(self, "Error", f"Failed to write {CONF_PATH}.")
+        elif not started:
+            QMessageBox.critical(
+                self, "Error",
+                "Config written but plasmashell failed to start.\n"
+                f"Run: systemctl --user start {SERVICE}")
+        else:
+            self.statusBar().showMessage("Applied.", 5000)
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("taskbar-compact-settings")
+    app.setDesktopFileName("taskbar-compact-settings")
+    win = MainWindow()
+    win.resize(680, 560)
+    win.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

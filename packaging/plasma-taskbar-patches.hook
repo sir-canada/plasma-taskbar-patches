@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Upgrade
+Type = Package
+Target = plasma-workspace
+Target = plasma-desktop
+
+[Action]
+Description = REMINDER: out-of-tree taskbar patches were overwritten by this upgrade
+When = PostTransaction
+Exec = /usr/bin/echo ">>> plasma-desktop/plasma-workspace upgraded: the taskbar-compact-launchers, taskbar-group-reorder (intra-group drag reorder), and systray-2rows patches were REVERTED to stock. Re-apply them with: ~/Documents/projects/plasma-taskbar-patches/reapply-all.sh <<<"

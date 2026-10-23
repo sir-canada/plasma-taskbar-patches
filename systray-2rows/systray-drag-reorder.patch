@@ -1,0 +1,251 @@
+diff --color -ruN a/applets/systemtray/main.xml b/applets/systemtray/main.xml
+--- a/applets/systemtray/main.xml	2026-07-14 04:12:17.327483994 +0300
++++ b/applets/systemtray/main.xml	2026-07-14 04:11:58.901788408 +0300
+@@ -22,6 +22,10 @@
+       <label>All items that are shown. It's a comma-separated string list of unique identifiers that are either plasmoid plugin ids or StatusNotifier ids.</label>
+       <default></default>
+     </entry>
++    <entry name="itemOrder" type="StringList">
++      <label>Manual order of the items in the panel. It's a comma-separated string list of unique identifiers that are either plasmoid plugin ids or StatusNotifier ids. When non-empty, replaces the category-based sorting; ids not in the list are appended using the stock sorting. Delete the key to restore stock sorting.</label>
++      <default></default>
++    </entry>
+     <entry name="showAllItems" type="bool">
+         <label>If true, all systray entries will be always in the main area, outside the popup.</label>
+         <default>false</default>
+diff --color -ruN a/applets/systemtray/qml/AbstractItem.qml b/applets/systemtray/qml/AbstractItem.qml
+--- a/applets/systemtray/qml/AbstractItem.qml	2026-07-14 04:12:17.327206237 +0300
++++ b/applets/systemtray/qml/AbstractItem.qml	2026-07-14 04:11:58.900076727 +0300
+@@ -58,6 +58,88 @@
+             && Kirigami.Units.longDuration > 0
+     }
+ 
++    // Drag-to-reorder: dragging an icon in the visible tray grid past the drag
++    // threshold engages a manual order. On release the full visible-order id list
++    // (with the dragged id spliced in at the target cell) is written to the
++    // "itemOrder" config key; the C++ SortedSystemTrayModel re-sorts accordingly.
++    // The handler takes a passive grab on press and only steals the exclusive grab
++    // from the regular MouseAreas once the threshold is exceeded, so clicks,
++    // wheel and press-and-hold behavior stay untouched.
++    DragHandler {
++        id: reorderHandler
++        enabled: abstractItem.inVisibleLayout
++        acceptedButtons: Qt.LeftButton
++        target: null
++        property point lastScenePos
++        onCentroidChanged: {
++            if (active) {
++                lastScenePos = centroid.scenePosition;
++            }
++        }
++        onActiveChanged: {
++            if (active) {
++                lastScenePos = centroid.scenePosition;
++            } else {
++                abstractItem.reorderDrop(lastScenePos);
++            }
++        }
++    }
++
++    // Floating copy of the dragged icon that follows the pointer during
++    // drag-to-reorder. Parented to the applet root with a high z so it is not
++    // affected by delegate clipping or the keyboard-navigation z-restacking of
++    // the grid delegates. Positioned with direct bindings (no animations).
++    ShaderEffectSource {
++        id: dragGhost
++        parent: root
++        z: 10000
++        visible: reorderHandler.active
++        sourceItem: reorderHandler.active ? iconContainer : null
++        width: iconContainer.width
++        height: iconContainer.height
++        opacity: 0.85
++        x: reorderHandler.active ? root.mapFromItem(null, reorderHandler.lastScenePos.x, reorderHandler.lastScenePos.y).x - width / 2 : 0
++        y: reorderHandler.active ? root.mapFromItem(null, reorderHandler.lastScenePos.x, reorderHandler.lastScenePos.y).y - height / 2 : 0
++    }
++
++    function reorderDrop(scenePos) {
++        const grid = root.visibleLayout;
++        const draggedId = model.itemId;
++        if (!grid || grid.count === 0 || !draggedId) {
++            return;
++        }
++        // Target cell from grid geometry; positions clamped into the grid, so a
++        // release outside it maps to the nearest edge cell. indexAt() operates on
++        // laid-out cell positions, so vertical panels, multi-row grids and
++        // reverseIconOrder (LayoutMirroring) are all handled by the view itself.
++        const pos = grid.mapFromItem(null, scenePos.x, scenePos.y);
++        const cx = Math.max(0, Math.min(grid.width - 1, pos.x)) + grid.contentX;
++        const cy = Math.max(0, Math.min(grid.height - 1, pos.y)) + grid.contentY;
++        let target = grid.indexAt(cx, cy);
++        const ids = [];
++        for (let i = 0; i < grid.count; ++i) {
++            const loader = grid.itemAtIndex(i);
++            if (!loader || !loader.item || !loader.item.model.itemId) {
++                return; // view not fully instantiated; don't write a partial order
++            }
++            ids.push(loader.item.model.itemId);
++        }
++        if (target < 0 || target >= ids.length) {
++            target = ids.length - 1; // released on an empty cell or past the end
++        }
++        const from = ids.indexOf(draggedId);
++        if (from < 0 || from === target) {
++            return;
++        }
++        ids.splice(from, 1);
++        ids.splice(target, 0, draggedId);
++        Plasmoid.configuration.itemOrder = ids;
++        // Save now instead of waiting for the deferred applet config sync,
++        // so the C++ sort model (which listens for KConfigLoader::configChanged)
++        // applies the new order immediately.
++        Plasmoid.configuration.writeConfig();
++    }
++
+     MouseArea {
+         id: mouseArea
+         propagateComposedEvents: true
+@@ -99,9 +181,16 @@
+     }
+ 
+     RowLayout {
++        id: contentLayout
+         anchors.fill: abstractItem
+         anchors.margins: abstractItem.inHiddenLayout ? abstractItem.margins : 0
+ 
++        // Instant (non-animated) feedback: dim the original delegate while the
++        // floating drag ghost is shown. The opacity must be on this layout, not
++        // on iconContainer itself, because the ghost's ShaderEffectSource
++        // captures iconContainer including its own opacity.
++        opacity: reorderHandler.active ? 0.3 : 1
++
+         spacing: Kirigami.Units.smallSpacing
+ 
+         FocusScope {
+diff --color -ruN a/applets/systemtray/sortedsystemtraymodel.cpp b/applets/systemtray/sortedsystemtraymodel.cpp
+--- a/applets/systemtray/sortedsystemtraymodel.cpp	2026-07-14 04:12:17.327319834 +0300
++++ b/applets/systemtray/sortedsystemtraymodel.cpp	2026-07-14 04:11:58.902180344 +0300
+@@ -26,6 +26,15 @@
+     sort(0);
+ }
+ 
++void SortedSystemTrayModel::setManualOrder(const QStringList &order)
++{
++    if (m_manualOrder == order) {
++        return;
++    }
++    m_manualOrder = order;
++    invalidate();
++}
++
+ bool SortedSystemTrayModel::lessThan(const QModelIndex &left, const QModelIndex &right) const
+ {
+     switch (m_sorting) {
+@@ -52,7 +61,23 @@
+ {
+     QVariant itemIdLeft = left.data(static_cast<int>(BaseModel::BaseRole::ItemId));
+     QVariant itemIdRight = right.data(static_cast<int>(BaseModel::BaseRole::ItemId));
+-    if (itemIdRight.toString() == QLatin1String("org.kde.plasma.notifications")) {
++
++    if (!m_manualOrder.isEmpty()) {
++        // Manual order mode: flat positional sort following the configured id list.
++        // Ids missing from the list (e.g. newly appeared items) fall through to the
++        // stock category+name comparison and sort after all listed items (append).
++        // The notifications-first special case is intentionally not applied here,
++        // otherwise the notifications icon could never be moved.
++        const int manualIndexLeft = m_manualOrder.indexOf(itemIdLeft.toString());
++        const int manualIndexRight = m_manualOrder.indexOf(itemIdRight.toString());
++        if (manualIndexLeft != -1 && manualIndexRight != -1) {
++            return manualIndexLeft < manualIndexRight;
++        } else if (manualIndexLeft != -1) {
++            return true;
++        } else if (manualIndexRight != -1) {
++            return false;
++        }
++    } else if (itemIdRight.toString() == QLatin1String("org.kde.plasma.notifications")) {
+         // return false when at least right is "org.kde.plasma.notifications"
+         return false;
+     } else if (itemIdLeft.toString() == QLatin1String("org.kde.plasma.notifications")) {
+diff --color -ruN a/applets/systemtray/sortedsystemtraymodel.h b/applets/systemtray/sortedsystemtraymodel.h
+--- a/applets/systemtray/sortedsystemtraymodel.h	2026-07-14 04:12:17.327325280 +0300
++++ b/applets/systemtray/sortedsystemtraymodel.h	2026-07-14 04:11:58.902032681 +0300
+@@ -7,6 +7,7 @@
+ #pragma once
+ 
+ #include <QSortFilterProxyModel>
++#include <QStringList>
+ 
+ class SortedSystemTrayModel : public QSortFilterProxyModel
+ {
+@@ -19,6 +20,13 @@
+ 
+     explicit SortedSystemTrayModel(SortingType sorting, QObject *parent = nullptr);
+ 
++    /**
++     * Sets the manual order of items (list of item ids, config key "itemOrder").
++     * A non-empty list replaces the category-based sorting for the SystemTray
++     * sorting type; an empty list restores the stock behavior.
++     */
++    void setManualOrder(const QStringList &order);
++
+ protected:
+     bool lessThan(const QModelIndex &source_left, const QModelIndex &source_right) const override;
+ 
+@@ -30,4 +38,5 @@
+     int compareCategoriesOrderly(const QModelIndex &left, const QModelIndex &right) const;
+ 
+     SortingType m_sorting;
++    QStringList m_manualOrder;
+ };
+diff --color -ruN a/applets/systemtray/systemtray.cpp b/applets/systemtray/systemtray.cpp
+--- a/applets/systemtray/systemtray.cpp	2026-07-14 04:12:17.327361819 +0300
++++ b/applets/systemtray/systemtray.cpp	2026-07-14 04:11:58.902413331 +0300
+@@ -446,6 +446,15 @@
+ {
+     if (!m_sortedSystemTrayModel) {
+         m_sortedSystemTrayModel = new SortedSystemTrayModel(SortedSystemTrayModel::SortingType::SystemTray, this);
++        if (m_settings) {
++            // Manual order (config key "itemOrder"): keep the sort model in sync with
++            // the configuration; SystemTraySettings emits configurationChanged for both
++            // external config changes and writes from QML (Plasmoid.configuration).
++            m_sortedSystemTrayModel->setManualOrder(m_settings->itemOrder());
++            connect(m_settings, &SystemTraySettings::configurationChanged, m_sortedSystemTrayModel, [this]() {
++                m_sortedSystemTrayModel->setManualOrder(m_settings->itemOrder());
++            });
++        }
+         m_sortedSystemTrayModel->setSourceModel(systemTrayModel());
+     }
+     return m_sortedSystemTrayModel;
+diff --color -ruN a/applets/systemtray/systemtraysettings.cpp b/applets/systemtray/systemtraysettings.cpp
+--- a/applets/systemtray/systemtraysettings.cpp	2026-07-14 04:12:17.327399517 +0300
++++ b/applets/systemtray/systemtraysettings.cpp	2026-07-14 04:11:58.901972345 +0300
+@@ -16,6 +16,7 @@
+ static const QString SHOWN_ITEMS_KEY = QStringLiteral("shownItems");
+ static const QString HIDDEN_ITEMS_KEY = QStringLiteral("hiddenItems");
+ static const QString DISABLED_SNIS_KEY = QStringLiteral("disabledStatusNotifiers");
++static const QString ITEM_ORDER_KEY = QStringLiteral("itemOrder");
+ 
+ SystemTraySettings::SystemTraySettings(KConfigLoader *config, QObject *parent)
+     : QObject(parent)
+@@ -96,6 +97,11 @@
+     return config->property(HIDDEN_ITEMS_KEY).toStringList();
+ }
+ 
++const QStringList SystemTraySettings::itemOrder() const
++{
++    return config->property(ITEM_ORDER_KEY).toStringList();
++}
++
+ void SystemTraySettings::cleanupPlugin(const QString &pluginId)
+ {
+     removeKnownPlugin(pluginId);
+diff --color -ruN a/applets/systemtray/systemtraysettings.h b/applets/systemtray/systemtraysettings.h
+--- a/applets/systemtray/systemtraysettings.h	2026-07-14 04:12:17.327406256 +0300
++++ b/applets/systemtray/systemtraysettings.h	2026-07-14 04:11:58.901840690 +0300
+@@ -36,6 +36,7 @@
+     bool isShowAllItems() const;
+     const QStringList shownItems() const;
+     const QStringList hiddenItems() const;
++    const QStringList itemOrder() const;
+ 
+     void cleanupPlugin(const QString &pluginId);
+ 

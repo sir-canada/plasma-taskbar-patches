@@ -1,0 +1,1458 @@
+--- a/applets/taskmanager/qml/Task.qml
++++ b/applets/taskmanager/qml/Task.qml
+@@ -47,6 +47,82 @@
+         : ((model.IsLauncher && !tasksRoot.iconsOnly) ? tasksRoot.height / taskList.rows : TaskManagerApplet.LayoutMetrics.preferredMaxWidth())
+     Layout.maximumHeight: tasksRoot.vertical ? TaskManagerApplet.LayoutMetrics.preferredMaxHeight() : -1
+ 
++    // Explicit grid placement so that on a multi-row horizontal panel the
++    // leading launchers stack R-per-column in narrow (row-height wide) columns
++    // instead of each launcher stretching to a full task width. Outside the
++    // gated case both bindings return -1, restoring GridLayout auto placement
++    // (byte-identical to stock behavior).
++    readonly property int rowCount: tasksRoot.taskList.rows
++    readonly property bool explicitPlacement: !tasksRoot.vertical && !tasksRoot.iconsOnly
++        && !inPopup && rowCount > 1
++    // Read as a dependency so a TaskList.layoutEpoch bump re-evaluates EVERY
++    // delegate's cell in the same pass after a model/registration storm. During
++    // such storms (drag reorder, window open/close, launcher registration
++    // ramp) delegates evaluate their cells against different snapshots of
++    // (launcherCount, count, index), which can map two tasks onto one grid
++    // cell. GridLayout refuses the second item ("addItem ... cell already
++    // taken"), parks it at the next free cell -- row R, a THIRD stripe -- and
++    // never retries, so the bogus row persists until the next storm. A single
++    // post-storm re-evaluation of all cells in one layout pass resolves it.
++    // The row/column clamps below make the two-row constraint structural:
++    // even a transiently colliding cell cannot create a third stripe.
++    Layout.row: {
++        if (!explicitPlacement) {
++            return -1;
++        }
++        const R = rowCount;
++        const epoch = tasksRoot.taskList.layoutEpoch;
++        let row;
++        if (model.IsLauncher) {
++            row = index % R;
++        } else {
++            const L = tasksRoot.taskList.launcherCount;
++            const T = tasksRoot.taskList.count - L;
++            const taskCols = Math.max(1, Math.ceil(T / R));
++            row = Math.floor((index - L) / taskCols);
++        }
++        return Math.max(0, Math.min(row, R - 1));
++    }
++    Layout.column: {
++        if (!explicitPlacement) {
++            return -1;
++        }
++        const R = rowCount;
++        const epoch = tasksRoot.taskList.layoutEpoch;
++        let col;
++        if (model.IsLauncher) {
++            col = Math.floor(index / R);
++        } else {
++            const L = tasksRoot.taskList.launcherCount;
++            const T = tasksRoot.taskList.count - L;
++            const taskCols = Math.max(1, Math.ceil(T / R));
++            col = Math.ceil(L / R) + ((index - L) % taskCols);
++        }
++        // Clamp to the layout's actual column count: GridLayout rejects an
++        // explicit Layout.column >= columns ("column should be less than the
++        // number of columns") and silently auto-places the item, which
++        // scrambled the row/column pairing mid-storm.
++        const maxCol = Math.max(0, tasksRoot.taskList.columns - 1);
++        return Math.max(0, Math.min(col, maxCol));
++    }
++
++    // The visible launcher count L used by the placement math above is
++    // maintained by each delegate registering itself with the task list through
++    // notifiable signals only (property change + Component life cycle), never a
++    // parent-side scan of children (which does not track dependencies and can
++    // latch at L=0 right after a quiet restart). Popup delegates are excluded
++    // via !inPopup so they never touch the main task list's count.
++    readonly property bool countsAsLauncher: !inPopup && visible && !!model && model.IsLauncher
++    property bool launcherRegistered: false
++    function syncLauncherRegistration(): void {
++        if (countsAsLauncher === launcherRegistered) {
++            return;
++        }
++        tasksRoot.taskList.launcherCount += countsAsLauncher ? 1 : -1;
++        launcherRegistered = countsAsLauncher;
++    }
++    onCountsAsLauncherChanged: syncLauncherRegistration()
++
+     required property var model
+     required property int index
+     required property /*main.qml*/ Item tasksRoot
+@@ -55,6 +131,117 @@
+     readonly property string appName: model.AppName
+     readonly property string appId: model.AppId
+     readonly property bool isIcon: tasksRoot.iconsOnly || model.IsLauncher
++
++    // FEATURE 1: task-button label with a leading indicator glyph + whitespace
++    // stripped (button label only; tooltips, model and Accessible text keep the
++    // raw title). G = ✳ ✻ ✶ ✽ ✢ · . ASCII '*' is intentionally NOT stripped.
++    readonly property string displayText: (model && model.display)
++        ? String(model.display).replace(/^[✳✻✶✽✢·⠀-⣿]\s+/, "")
++        : ""
++
++    // Adaptive task-label font size (see TaskList.qml recomputeAppliedFont):
++    // each eligible delegate reports the point size at which its full title
++    // would exactly fit its label clip (fitPointSize), derived from a
++    // TextMetrics measurement taken ALWAYS at the effective MINIMUM size —
++    // never the applied size — so the applied size can never feed back into
++    // the measurement (no sizing feedback loop). TaskList aggregates these
++    // via fitRevision bumps into the shared appliedFontPointSize.
++    //
++    // Resolved label font family, shared by the visible label and fitMetrics.
++    // Conf fontFamily wins; empty falls back to the theme font. Null-safe
++    // against a missing Kirigami.Theme.defaultFont (kdeglobals fonts-reset
++    // incident).
++    readonly property string labelFontFamily: {
++        const tl = task.tasksRoot.taskList;
++        const fam = tl ? tl.cfgFontFamily : "";
++        if (fam && fam.length > 0) {
++            return fam;
++        }
++        const def = Kirigami.Theme.defaultFont;
++        return def ? def.family : "Noto Sans";
++    }
++    // Effective minimum label point size. Hoisted to
++    // TaskList.effectiveFontMinPt (conf fontPointSize wins, else 0.65x the
++    // theme default clamped to a 6pt floor); the inline fallback below covers
++    // a null taskList only.
++    readonly property real labelFontMinPt: {
++        const tl = task.tasksRoot.taskList;
++        if (tl) {
++            return tl.effectiveFontMinPt;
++        }
++        const def = Kirigami.Theme.defaultFont;
++        return Math.max(6, (def ? def.pointSize : 10) * 0.65);
++    }
++    // Eligibility is purely local (null-safe against a missing taskList):
++    // only the flat multi-row main-list task labels participate.
++    readonly property bool fitEligible: task.explicitPlacement && !task.inPopup
++        && !!model && !model.IsLauncher && labelClip.visible
++    // Ideal point size at which this task's full title would exactly fit the
++    // clip width, clamped to [min, max]. Ineligible/degenerate delegates
++    // report the max so they never drag the aggregate down.
++    readonly property real fitPointSize: {
++        const tl = task.tasksRoot.taskList;
++        const minPt = task.labelFontMinPt;
++        const maxPt = tl ? tl.cfgFontPointSizeMax : 0;
++        if (maxPt <= minPt) {
++            return minPt;
++        }
++        const avail = labelClip.width;
++        const w = fitMetrics.advanceWidth;
++        if (!task.fitEligible || w <= 0 || avail <= 0) {
++            return maxPt;
++        }
++        return Math.max(minPt, Math.min(maxPt, minPt * avail / w));
++    }
++    onFitPointSizeChanged: {
++        if (tasksRoot.taskList) {
++            tasksRoot.taskList.fitRevision++;
++        }
++    }
++    onFitEligibleChanged: {
++        if (tasksRoot.taskList) {
++            tasksRoot.taskList.fitRevision++;
++        }
++    }
++    TextMetrics {
++        id: fitMetrics
++        font.family: task.labelFontFamily
++        // ALWAYS the effective minimum size, never the applied size (see the
++        // feedback-loop note above).
++        font.pointSize: task.labelFontMinPt
++        text: task.displayText
++    }
++
++    // FEATURE 2: Claude Code state visuals (S6). Claude Code prefixes its window
++    // title with an animated braille spinner glyph + space while WORKING
++    // (U+2800–U+28FF, e.g. "⠂ title" ↔ "⠐ title" alternating ~1/s) and with a
++    // non-braille glyph ("✳ ") when IDLE/DONE. stateWorking (braille prefix)
++    // drives the app-icon opacity pulse below. A done transition (braille prefix
++    // -> non-braille) latches attentionPending, which lights a steady orange
++    // stateFill until the user activates the window.
++    readonly property string rawTitle: (model && model.display) ? String(model.display) : ""
++    readonly property bool stateWorking: /^[⠀-⣿]\s/.test(rawTitle)
++    property bool attentionPending: false
++    readonly property bool isActiveWindow: !!model && model.IsActive
++    property string previousRawTitle: ""
++    property bool titleTracked: false
++    onRawTitleChanged: {
++        const workRe = /^[⠀-⣿]\s/;
++        if (titleTracked && model && !model.IsGroupParent
++                && workRe.test(previousRawTitle) && !workRe.test(rawTitle)
++                && !isActiveWindow) {
++            attentionPending = true;
++        }
++        previousRawTitle = rawTitle;
++        titleTracked = true;
++    }
++    onIsActiveWindowChanged: {
++        // Activating the window acknowledges the done/attention latch.
++        if (isActiveWindow) {
++            attentionPending = false;
++        }
++    }
++
+     property bool toolTipOpen: false
+     property bool inPopup: false
+     property bool isWindow: model.IsWindow
+@@ -79,6 +266,198 @@
+         || (task.contextMenu && task.contextMenu.status === PlasmaExtras.Menu.Open)
+         || (!!tasksRoot.groupDialog && tasksRoot.groupDialog.visualParent === task)
+ 
++    // Windows-style flat state visuals. State drivers for the stateFill
++    // Rectangle that replaces the stock stateful tasks.svg frame look
++    // (the frame is kept at opacity 0 only for its geometry/margins). A group
++    // parent is treated as a normal task: stateActive follows model.IsActive,
++    // which the model already sets when any grouped child is active; otherwise
++    // it simply gets the running style.
++    readonly property bool stateHovered: task.highlighted && Plasmoid.configuration.taskHoverEffect
++    readonly property bool stateActive: !!model && model.IsActive
++    readonly property bool stateLauncher: !!model && model.IsLauncher
++    readonly property bool stateAttention: (!!model && model.IsDemandingAttention)
++        || (task.smartLauncherItem && task.smartLauncherItem.urgent) || task.attentionPending
++
++    // Claude-state visuals, read at runtime from taskbar-compact.conf via TaskList
++    // (no rebuild to switch). The visual set is freely mixable through two keys:
++    //   workingVisual   - COMMA-SEPARATED list, any of {icon-pulse (S6),
++    //                     tint-pulse (S1), underline (S2), bevel (S3),
++    //                     edge-bar (S4), none}
++    //   attentionVisual - ONE of {fill, flash (S5), two-stage (S7), underline,
++    //                     bevel, edge-bar, none}
++    // Legacy back-compat: claudeStyle in {icon-pulse, bevel, both} is a legacy alias.
++    // When a new key is ABSENT (empty), its value is DERIVED from claudeStyle:
++    //   icon-pulse -> working "icon-pulse",       attention "fill"
++    //   bevel      -> working "bevel",            attention "bevel"
++    //   both       -> working "bevel,icon-pulse", attention "bevel"
++    // When the new key is present it wins. All lookups null-safe.
++    readonly property string claudeStyle: {
++        const tl = task.tasksRoot.taskList;
++        const s = tl ? tl.cfgClaudeStyle : "";
++        return (s === "bevel" || s === "both" || s === "icon-pulse") ? s : "icon-pulse";
++    }
++    // Effective working-visual string: the configured workingVisual if non-empty,
++    // otherwise derived from the legacy claudeStyle alias.
++    readonly property string workingVisualStr: {
++        const tl = task.tasksRoot.taskList;
++        const s = tl ? tl.cfgWorkingVisual : "";
++        if (s && s.trim().length > 0) {
++            return s;
++        }
++        const cs = task.claudeStyle;
++        if (cs === "bevel") return "bevel";
++        if (cs === "both") return "bevel,icon-pulse";
++        return "icon-pulse";
++    }
++    // Parse the comma list into a membership map. Unknown tokens (incl. "none")
++    // simply set nothing.
++    readonly property var workingVisualSet: {
++        const out = { "icon-pulse": false, "tint-pulse": false, "underline": false,
++                      "bevel": false, "edge-bar": false };
++        const parts = task.workingVisualStr.split(",");
++        for (let i = 0; i < parts.length; ++i) {
++            const t = parts[i].trim();
++            if (t in out) {
++                out[t] = true;
++            }
++        }
++        return out;
++    }
++    readonly property bool workIconPulse: task.workingVisualSet["icon-pulse"]
++    readonly property bool workTintPulse: task.workingVisualSet["tint-pulse"]
++    readonly property bool workUnderline: task.workingVisualSet["underline"]
++    readonly property bool workBevel: task.workingVisualSet["bevel"]
++    readonly property bool workEdgeBar: task.workingVisualSet["edge-bar"]
++
++    // Effective attention visual: configured attentionVisual if a valid token,
++    // else derived from the legacy claudeStyle alias.
++    readonly property string attentionVisual: {
++        const tl = task.tasksRoot.taskList;
++        const s = tl ? String(tl.cfgAttentionVisual).trim() : "";
++        const valid = ["fill", "flash", "two-stage", "underline", "bevel", "edge-bar", "none"];
++        if (valid.indexOf(s) >= 0) {
++            return s;
++        }
++        const cs = task.claudeStyle;
++        return (cs === "bevel" || cs === "both") ? "bevel" : "fill";
++    }
++    readonly property bool attnFill: task.attentionVisual === "fill"
++    readonly property bool attnFlash: task.attentionVisual === "flash"
++    readonly property bool attnTwoStage: task.attentionVisual === "two-stage"
++    readonly property bool attnUnderline: task.attentionVisual === "underline"
++    readonly property bool attnBevel: task.attentionVisual === "bevel"
++    readonly property bool attnEdgeBar: task.attentionVisual === "edge-bar"
++
++    // Optional base colors for the working / attention visuals (workingColor,
++    // attentionColor in taskbar-compact.conf). Empty/unparseable falls back to the
++    // theme color, so a malformed value can never break the Task type. icon-pulse
++    // is opacity-only and ignores workingColor. Qt.color() maps an unparseable
++    // string to invalid black "#000000"; we treat that as the fallback UNLESS the
++    // user explicitly asked for black.
++    function parseColor(str, fallback) {
++        if (!str) {
++            return fallback;
++        }
++        const s = String(str).trim();
++        if (s.length === 0) {
++            return fallback;
++        }
++        const c = Qt.color(s);
++        const wantsBlack = (s.toLowerCase() === "black" || s.toLowerCase() === "#000000"
++            || s.toLowerCase() === "#ff000000");
++        if (c.toString() === "#000000" && !wantsBlack) {
++            return fallback;
++        }
++        return c;
++    }
++    readonly property color workingBaseColor: task.parseColor(
++        task.tasksRoot.taskList ? task.tasksRoot.taskList.cfgWorkingColor : "",
++        Kirigami.Theme.highlightColor)
++    readonly property color attentionBaseColor: task.parseColor(
++        task.tasksRoot.taskList ? task.tasksRoot.taskList.cfgAttentionColor : "",
++        Kirigami.Theme.neutralTextColor)
++    // Whether a VALID workingColor was configured. Used by the S3 bevel, whose
++    // working gradient defaults to WHITE (the raised-highlight look, not the theme
++    // highlightColor) and is only tinted when workingColor is explicitly set.
++    readonly property bool workingColorSet: {
++        const tl = task.tasksRoot.taskList;
++        const s = tl ? String(tl.cfgWorkingColor).trim() : "";
++        if (s.length === 0) {
++            return false;
++        }
++        const wantsBlack = (s.toLowerCase() === "black" || s.toLowerCase() === "#000000"
++            || s.toLowerCase() === "#ff000000");
++        return (Qt.color(s).toString() !== "#000000") || wantsBlack;
++    }
++
++    readonly property real pulsePeriodMs: {
++        const tl = task.tasksRoot.taskList;
++        const p = tl ? tl.cfgPulsePeriodMs : 0;
++        return p > 0 ? p : 1600;
++    }
++    readonly property real pulseDimValue: {
++        const tl = task.tasksRoot.taskList;
++        const d = tl ? tl.cfgPulseDim : 0;
++        return (d > 0 && d < 1) ? d : 0.45;
++    }
++    // Number of Timer ticks per pulse cycle. Higher = smoother; 2 reproduces the
++    // old 2-state blink. Clamped to a sane 2..60. Null-safe (default 16).
++    readonly property int pulseStepsValue: {
++        const tl = task.tasksRoot.taskList;
++        const n = tl ? tl.cfgPulseSteps : 0;
++        return Math.max(2, Math.min(60, n > 0 ? Math.round(n) : 16));
++    }
++    // Whether the S3 bevel brightness breathes with the pulse phase. Null-safe
++    // (default true). false = bevel stays static while working (icon pulse still
++    // pulses, driven by the same phase).
++    readonly property bool bevelBreatheValue: {
++        const tl = task.tasksRoot.taskList;
++        return tl ? tl.cfgBevelBreathe : true;
++    }
++    // Full attention-flash (S5) square-wave cycle in ms. Null-safe (default 2400).
++    readonly property real flashPeriodMsValue: {
++        const tl = task.tasksRoot.taskList;
++        const p = tl ? tl.cfgFlashPeriodMs : 0;
++        return p > 0 ? p : 2400;
++    }
++    // Two-stage (S7) attention intro duration in ms. 0 is VALID (= skip the
++    // intro entirely, straight to the subtle latch pulse). Negative/missing
++    // falls back to 5000; clamped to 0..60000.
++    readonly property int attentionIntroMsValue: {
++        const tl = task.tasksRoot.taskList;
++        const v = tl ? tl.cfgAttentionIntroMs : -1;
++        return (v >= 0) ? Math.min(60000, Math.round(v)) : 5000;
++    }
++    // Two-stage (S7) attention latch pulse period in ms. Non-positive/missing
++    // falls back to 3000; clamped to 200..60000.
++    readonly property int attentionLatchPeriodMsValue: {
++        const tl = task.tasksRoot.taskList;
++        const v = tl ? tl.cfgAttentionLatchPeriodMs : 0;
++        return (v > 0) ? Math.max(200, Math.min(60000, Math.round(v))) : 3000;
++    }
++    // Corner radius of the flat button fills (stateFill, washFill, and the S3
++    // bevel background). 0 is VALID (= square corners). Negative/missing falls
++    // back to 3; clamped to 0..10. Does NOT affect the underline/edge-bar bars.
++    readonly property real fillRadiusValue: {
++        const tl = task.tasksRoot.taskList;
++        const v = tl ? tl.cfgFillRadius : -1;
++        return (v >= 0) ? Math.min(10, v) : 3;
++    }
++
++    // Whether any selected working visual actually animates on the shared pulse
++    // phase (icon-pulse / tint-pulse / underline / edge-bar always do; bevel only
++    // when bevelBreathe is on). Used to gate the pulse Timer so it does not tick
++    // when there is nothing to animate.
++    readonly property bool workingAnimated: task.workIconPulse || task.workTintPulse
++        || task.workUnderline || task.workEdgeBar
++        || (task.workBevel && task.bevelBreatheValue)
++    // The pulse Timer runs only while working AND something animated is selected.
++    readonly property bool pulseActive: task.stateWorking && task.workingAnimated
++    // The attention-flash Timer runs only while attention-latched AND flash chosen.
++    readonly property bool flashActive: task.stateAttention && task.attnFlash
++    // The two-stage Timer runs only while attention-latched AND two-stage chosen.
++    readonly property bool twoStageActive: task.stateAttention && task.attnTwoStage
++
+     active: !inPopup && !tasksRoot.groupDialog && task.contextMenu?.status !== PlasmaExtras.Menu.Open && task === (tasksRoot.toolTipOpenedByClick ?? task)
+     interactive: model.IsWindow || mainItem.playerData
+     hideOnClick: !(hasAudioStream && audioIndicatorsEnabled)
+@@ -148,6 +527,160 @@
+         id: translateTransform
+     }
+ 
++    // WORKING visual driver: while Claude Code is busy (window title starts with
++    // an animated braille spinner glyph, task.stateWorking), a Timer steps a phase
++    // pulsePhaseStep around [0, pulseStepsValue) at pulseStepsValue ticks per
++    // pulsePeriodMs cycle (interval = pulsePeriodMs / pulseStepsValue). From that
++    // integer step a smooth cosine-eased factor pulseFactor = 0.5 - 0.5*cos(2*PI*
++    // phase) rises 0 -> 1 -> 0 once per cycle. This single shared phase drives BOTH
++    // the S6 icon-opacity pulse (Kirigami.Icon.opacity below) and the S3 bevel
++    // brightness breathe (bevelFill below), depending on claudeStyle.
++    //
++    // A Timer is used rather than a QML Animation because this desktop has KDE
++    // animations globally disabled (AnimationDurationFactor=0), which collapses
++    // Animation/Behavior durations to 0 so a NumberAnimation on opacity never
++    // advances and the visual stays static. A Timer is independent of the animation
++    // system, so the stepped bindings still advance and the visual pulses/breathes
++    // smoothly. pulseStepsValue=2 reproduces the old 2-state blink; the default 16
++    // (10 ticks/s at the 1600ms default) reads as a smooth glow.
++    //
++    // The Timer is PER-TASK (one per delegate, not a global always-running timer)
++    // and IMPERATIVELY GATED: it is started/stopped from onPulseActiveChanged (and
++    // an initial check in Component.onCompleted) rather than a declarative
++    // `running: task.stateWorking` binding. A `running:` binding to a property was
++    // found NOT to reliably auto-start the Timer on this platform (the icon stayed
++    // static), but explicit start()/stop() from the change handler is reliable and
++    // means an idle taskbar runs ZERO pulse timers (~30 delegates would otherwise
++    // each tick a 100ms timer forever). pulseActive is true only while stateWorking
++    // AND an animated working visual is selected. pulseFactor is additionally gated
++    // on stateWorking so the visual is neutral the instant work ends.
++    property int pulsePhaseStep: 0
++    readonly property real pulseFactor: task.stateWorking
++        ? (0.5 - 0.5 * Math.cos(2 * Math.PI * (task.pulsePhaseStep / task.pulseStepsValue)))
++        : 0
++    Timer {
++        id: iconPulseTimer
++        interval: Math.max(1, Math.round(task.pulsePeriodMs / task.pulseStepsValue))
++        repeat: true
++        running: false
++        onTriggered: task.pulsePhaseStep = (task.pulsePhaseStep + 1) % task.pulseStepsValue
++    }
++    onPulseActiveChanged: {
++        if (task.pulseActive) {
++            task.pulsePhaseStep = 0;
++            iconPulseTimer.start();
++        } else {
++            iconPulseTimer.stop();
++            task.pulsePhaseStep = 0;
++        }
++    }
++
++    // ATTENTION-FLASH (S5) driver: a hard square wave for the flashing orange fill.
++    // A separate phase (flashPhaseStep over flashSteps ticks per flashPeriodMs
++    // cycle) drives a ~45/55 duty on/off with HARD steps (no easing). Also
++    // imperatively gated (onFlashActiveChanged + Component.onCompleted): runs only
++    // while the delegate is attention-latched AND attentionVisual == flash.
++    property int flashPhaseStep: 0
++    readonly property int flashSteps: 20
++    readonly property bool flashOn: (task.flashPhaseStep / task.flashSteps) < 0.45
++    Timer {
++        id: attnFlashTimer
++        interval: Math.max(1, Math.round(task.flashPeriodMsValue / task.flashSteps))
++        repeat: true
++        running: false
++        onTriggered: task.flashPhaseStep = (task.flashPhaseStep + 1) % task.flashSteps
++    }
++    onFlashActiveChanged: {
++        if (task.flashActive) {
++            task.flashPhaseStep = 0;
++            attnFlashTimer.start();
++        } else {
++            attnFlashTimer.stop();
++            task.flashPhaseStep = 0;
++        }
++    }
++
++    // TWO-STAGE (S7) attention driver: a Timer-stepped alpha over the attention
++    // color painted by stateFill (attentionVisual == two-stage).
++    //  * Stage 1 (intro, attentionIntroMs, default 5000; 0 = skip): a whole-button
++    //    DECELERATING tint pulse — a hardcoded keyframe table (t fraction ->
++    //    alpha), cosine ease-in-out between adjacent keyframes. The table always
++    //    occupies the FINAL 5000 ms of the intro in real time (so the approved
++    //    ~1 s pulse pacing never stretches); when attentionIntroMs > 5000 the
++    //    first (attentionIntroMs - 5000) ms are a LEAD-IN of full-depth 1 s
++    //    cosine pulses 0.12 <-> 0.55 whose phase is anchored BACKWARDS from the
++    //    lead-in end, so it always lands exactly on 0.12 falling into the
++    //    table's 0.12 start — seamless for ANY introMs, not just multiples of
++    //    1000. attentionIntroMs <= 5000 compresses the table over the whole
++    //    intro (previous behavior).
++    //  * Stage 2 (latch, infinite): subtle cosine pulse 0.27 <-> 0.42, one cycle
++    //    per attentionLatchPeriodMs (default 3000), phase 0 at latch start. The
++    //    intro table ends at 0.27 rising and the latch starts at 0.27 rising, so
++    //    the stage handoff is seamless.
++    // Same trigger/latch semantics as every other attention visual (incl. the
++    // attentionPending working->done latch; activation clears it, even mid-intro,
++    // via stateAttention going false -> twoStageActive false -> stop()).
++    // Timer-driven (NOT a QML Animation: AnimationDurationFactor=0 zeroes those)
++    // at a fixed 50 ms step; elapsed time is a Date.now() delta from the moment
++    // two-stage attention began, so tick jitter cannot drift the curve. Gated
++    // imperatively (onTwoStageActiveChanged + Component.onCompleted), same
++    // pattern as the pulse/flash Timers; alpha and epoch reset on stop.
++    property double twoStageEpochMs: 0
++    property real twoStageAlpha: 0
++    function twoStageAlphaAt(elapsedMs) {
++        const introMs = task.attentionIntroMsValue;
++        if (elapsedMs < introMs) {
++            // Stage 1. The keyframe table occupies the FINAL tableMs = min(introMs,
++            // 5000) ms of the intro; anything before that is the full-depth 1 s
++            // lead-in (only when introMs > 5000).
++            const tableMs = Math.min(introMs, 5000);
++            const leadEnd = introMs - tableMs;
++            if (elapsedMs < leadEnd) {
++                // LEAD-IN: full-depth cosine pulses 0.12 <-> 0.55, 1000 ms period,
++                // phase anchored to leadEnd (counted backwards) so the pulse train
++                // always ends exactly at 0.12 falling into the table's 0.12 start.
++                return 0.12 + (0.55 - 0.12)
++                    * (0.5 - 0.5 * Math.cos(2 * Math.PI * (elapsedMs - leadEnd) / 1000));
++            }
++            // Table: hardcoded decelerating keyframes (t fraction OF THE 5000 ms
++            // TABLE WINDOW -> alpha), cosine ease-in-out between adjacent points.
++            const kt = [0.00, 0.10, 0.20, 0.30, 0.40, 0.51, 0.63, 0.78, 0.90, 1.00];
++            const ka = [0.12, 0.55, 0.12, 0.55, 0.12, 0.53, 0.16, 0.46, 0.24, 0.27];
++            const t = (elapsedMs - leadEnd) / tableMs;
++            let i = 0;
++            while (i < kt.length - 2 && t >= kt[i + 1]) {
++                ++i;
++            }
++            const u = (t - kt[i]) / (kt[i + 1] - kt[i]);
++            return ka[i] + (ka[i + 1] - ka[i]) * (0.5 - 0.5 * Math.cos(Math.PI * u));
++        }
++        // Stage 2: subtle latch pulse, phase 0 (alpha 0.27, rising) at latch start.
++        const period = task.attentionLatchPeriodMsValue;
++        const phase = ((elapsedMs - introMs) % period) / period;
++        return 0.27 + (0.42 - 0.27) * (0.5 - 0.5 * Math.cos(2 * Math.PI * phase));
++    }
++    Timer {
++        id: twoStageTimer
++        interval: 50
++        repeat: true
++        running: false
++        onTriggered: task.twoStageAlpha = task.twoStageAlphaAt(Date.now() - task.twoStageEpochMs)
++    }
++    function startTwoStage() {
++        task.twoStageEpochMs = Date.now();
++        task.twoStageAlpha = task.twoStageAlphaAt(0);
++        twoStageTimer.start();
++    }
++    onTwoStageActiveChanged: {
++        if (task.twoStageActive) {
++            task.startTwoStage();
++        } else {
++            twoStageTimer.stop();
++            task.twoStageEpochMs = 0;
++            task.twoStageAlpha = 0;
++        }
++    }
++
+     Accessible.name: model.display
+     Accessible.description: {
+         if (!model.display) {
+@@ -481,6 +1014,14 @@
+         property string basePrefix: "normal"
+         prefix: isHovered ? TaskManagerApplet.TaskTools.taskPrefixHovered(basePrefix, Plasmoid.location) : TaskManagerApplet.TaskTools.taskPrefix(basePrefix, Plasmoid.location)
+ 
++        // Windows-style flat look: the stock stateful frame background is
++        // suppressed (opacity 0) but the item is KEPT so its geometry/margins
++        // still drive the progress overlay, audio indicator and the flat-state
++        // Rectangles below (which anchor to it). visible:false is deliberately
++        // NOT used: it would disable the DragHandler child and the fill: frame
++        // anchors of the overlays.
++        opacity: 0
++
+         // Avoid repositioning delegate item after dragFinished
+         DragHandler {
+             id: dragHandler
+@@ -525,6 +1066,204 @@
+         }
+     }
+ 
++    // Flat-state fill, behind the icon/label. No fill for a plain running task;
++    // active = highlightColor @0.20 (0.28 if also hovered); hover-only =
++    // textColor @0.08; launcher = hover fill only; attention/flash pulses
++    // neutralTextColor (driven by task.attentionPending via stateAttention).
++    Rectangle {
++        id: stateFill
++        anchors.fill: frame
++        radius: task.fillRadiusValue
++        // Flat-orange attention fill is drawn ONLY when attentionVisual == fill.
++        // For every other attention visual (flash/underline/bevel/edge-bar/none)
++        // the flat fill falls through to the active/hover/none look and the chosen
++        // visual paints instead, so the two never double up.
++        readonly property bool showAttentionFill: task.stateAttention && task.attnFill
++        // Two-stage (S7) attention: stateFill paints the Timer-stepped alpha
++        // (task.twoStageAlpha) over the attention color instead of the steady
++        // 0.35 flat fill.
++        readonly property bool showTwoStage: task.stateAttention && task.attnTwoStage
++        color: (stateFill.showAttentionFill || stateFill.showTwoStage) ? task.attentionBaseColor
++             : task.stateActive ? Kirigami.Theme.highlightColor
++             : Kirigami.Theme.textColor
++        opacity: {
++            if (task.stateLauncher) {
++                return task.stateHovered ? 0.08 : 0;
++            }
++            if (stateFill.showTwoStage) {
++                return task.twoStageAlpha;
++            }
++            if (stateFill.showAttentionFill) {
++                return 0.35;
++            }
++            if (task.stateActive) {
++                return task.stateHovered ? 0.28 : 0.20;
++            }
++            return task.stateHovered ? 0.08 : 0;
++        }
++        // The ~100ms smoothing Behaviors are DISABLED while the two-stage visual
++        // paints: its alpha is already stepped every 50 ms by twoStageTimer, and
++        // a 100ms NumberAnimation retargeted every 50 ms would forever lag the
++        // curve (and on this desktop AnimationDurationFactor=0 makes the Behavior
++        // duration unreliable anyway). Everything else keeps the smoothing.
++        Behavior on opacity { enabled: !stateFill.showTwoStage; NumberAnimation { duration: 100 } }
++        Behavior on color { enabled: !stateFill.showTwoStage; ColorAnimation { duration: 100 } }
++    }
++
++    // Full-button wash Rectangle (lowest of the Claude visuals, above stateFill):
++    //  * S1 tint-pulse WORKING: whole button breathes highlightColor alpha
++    //    0.05 -> 0.16 on the shared smooth pulse factor f.
++    //  * S5 flash ATTENTION: hard orange square wave, alpha 0.40 <-> 0.05 on the
++    //    flashOn phase (no Behavior so the step stays hard).
++    //  * S4 edge-bar ATTENTION: a faint steady orange wash @0.15 accompanying the
++    //    left bar (the bar itself is edgeBar below).
++    // Attention takes priority over working. No Behavior on opacity: the flash must
++    // step hard and the pulse factor is already stepped.
++    Rectangle {
++        id: washFill
++        anchors.fill: frame
++        radius: task.fillRadiusValue
++        color: (task.stateAttention && (task.attnFlash || task.attnEdgeBar))
++            ? task.attentionBaseColor
++            : task.workingBaseColor
++        opacity: {
++            if (task.stateAttention) {
++                if (task.attnFlash) {
++                    return task.flashOn ? 0.40 : 0.05;
++                }
++                if (task.attnEdgeBar) {
++                    return 0.15;
++                }
++                return 0;
++            }
++            if (task.stateWorking && task.workTintPulse) {
++                return 0.05 + 0.11 * task.pulseFactor;
++            }
++            return 0;
++        }
++    }
++
++    // S3 "3D bevel" Claude-state visual (claudeStyle bevel/both), layered above
++    // stateFill but below the icon/label. WORKING: a raised clickable look — a
++    // vertical white gradient (top @0.10 -> bottom @0.02 alpha) with a 1px light
++    // edge on top+left (white @0.22) and a 1px dark edge on bottom+right
++    // (black @0.55), gently breathing up to ~1.35x brighter on the smooth pulse
++    // phase (pulseFactor), toggleable via bevelBreathe (false = fully static).
++    // ATTENTION: a STEADY raised bevel with an orange gradient (neutralTextColor
++    // @0.45 -> @0.25) plus the same edges, replacing the flat orange fill while
++    // the done/attention latch is set. Attention takes priority over working.
++    // QML Rectangle has no per-side border, so the edges are thin Rectangles.
++    // Rendered only for the bevel style; icon-pulse style leaves this hidden.
++    Item {
++        id: bevelFill
++        anchors.fill: frame
++
++        readonly property bool bevelAttention: task.stateAttention && task.attnBevel
++        readonly property bool bevelWorking: task.stateWorking && task.workBevel && !task.stateAttention
++        visible: bevelFill.bevelAttention || bevelFill.bevelWorking
++        // Brightness breathe (working only): the smooth pulse factor scales the
++        // gradient alphas continuously between normal (f=0) and ~1.35x (f=1).
++        // Zero for attention (steady) and when bevelBreathe is off (static).
++        readonly property real breatheFactor: (bevelWorking && task.bevelBreatheValue) ? task.pulseFactor : 0
++        // Gradient base colors: attention uses the attention base (theme
++        // neutralTextColor by default); working uses the working base (theme
++        // highlightColor by default -- the raised-white look is preserved by
++        // setting workingColor=white, but a custom workingColor tints the breathe).
++        readonly property color attn: task.attentionBaseColor
++        // Working bevel keeps the raised WHITE look by default; only a configured
++        // workingColor tints the breathe.
++        readonly property color work: task.workingColorSet ? task.workingBaseColor : Qt.rgba(1, 1, 1, 1)
++
++        Rectangle {
++            id: bevelBg
++            anchors.fill: parent
++            radius: task.fillRadiusValue
++            gradient: Gradient {
++                GradientStop {
++                    position: 0.0
++                    color: bevelFill.bevelAttention
++                        ? Qt.rgba(bevelFill.attn.r, bevelFill.attn.g, bevelFill.attn.b, 0.45)
++                        : Qt.rgba(bevelFill.work.r, bevelFill.work.g, bevelFill.work.b, 0.10 * (1 + 0.35 * bevelFill.breatheFactor))
++                }
++                GradientStop {
++                    position: 1.0
++                    color: bevelFill.bevelAttention
++                        ? Qt.rgba(bevelFill.attn.r, bevelFill.attn.g, bevelFill.attn.b, 0.25)
++                        : Qt.rgba(bevelFill.work.r, bevelFill.work.g, bevelFill.work.b, 0.02 * (1 + 0.35 * bevelFill.breatheFactor))
++                }
++            }
++        }
++        // Light edges (top + left). Attention uses white @0.25, working white @0.22.
++        readonly property color lightEdge: Qt.rgba(1, 1, 1, bevelAttention ? 0.25 : 0.22)
++        readonly property color darkEdge: Qt.rgba(0, 0, 0, 0.55)
++        Rectangle { // top light
++            anchors { top: parent.top; left: parent.left; right: parent.right }
++            height: 1; color: bevelFill.lightEdge
++        }
++        Rectangle { // left light
++            anchors { top: parent.top; bottom: parent.bottom; left: parent.left }
++            width: 1; color: bevelFill.lightEdge
++        }
++        Rectangle { // bottom dark
++            anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
++            height: 1; color: bevelFill.darkEdge
++        }
++        Rectangle { // right dark
++            anchors { top: parent.top; bottom: parent.bottom; right: parent.right }
++            width: 1; color: bevelFill.darkEdge
++        }
++    }
++
++    // S2 underline: a 2px bar along the button bottom, inset 3px left/right,
++    // radius 1. WORKING (workUnderline): highlightColor, opacity pulsing 0.25 ->
++    // 1.0 on the shared factor f. ATTENTION (attnUnderline): steady orange @1.0.
++    // Above the fills, below the icon/label. Attention takes priority.
++    Rectangle {
++        id: underlineBar
++        anchors {
++            left: frame.left
++            right: frame.right
++            bottom: frame.bottom
++            leftMargin: 3
++            rightMargin: 3
++            bottomMargin: 1
++        }
++        height: 2
++        radius: 1
++        visible: (task.stateWorking && task.workUnderline) || (task.stateAttention && task.attnUnderline)
++        color: (task.stateAttention && task.attnUnderline)
++            ? task.attentionBaseColor
++            : task.workingBaseColor
++        opacity: (task.stateAttention && task.attnUnderline) ? 1.0
++               : (task.stateWorking && task.workUnderline) ? (0.25 + 0.75 * task.pulseFactor)
++               : 0
++    }
++
++    // S4 edge bar: a 3px bar at the button's LEFT edge, inset 2px top/bottom,
++    // radius 1. WORKING (workEdgeBar): highlightColor, opacity pulsing 0.3 -> 1.0
++    // on the shared factor f. ATTENTION (attnEdgeBar): steady orange @1.0 (the
++    // faint orange wash accompanying it is drawn by washFill above). Attention
++    // takes priority.
++    Rectangle {
++        id: edgeBar
++        anchors {
++            left: frame.left
++            top: frame.top
++            bottom: frame.bottom
++            topMargin: 2
++            bottomMargin: 2
++        }
++        width: 3
++        radius: 1
++        visible: (task.stateWorking && task.workEdgeBar) || (task.stateAttention && task.attnEdgeBar)
++        color: (task.stateAttention && task.attnEdgeBar)
++            ? task.attentionBaseColor
++            : task.workingBaseColor
++        opacity: (task.stateAttention && task.attnEdgeBar) ? 1.0
++               : (task.stateWorking && task.workEdgeBar) ? (0.3 + 0.7 * task.pulseFactor)
++               : 0
++    }
++
+     Loader {
+         id: taskProgressOverlayLoader
+ 
+@@ -577,6 +1316,15 @@
+             enabled: true
+ 
+             source: task.model.decoration
++
++            // S6 WORKING visual: smoothly pulse the app icon opacity between 1.0
++            // and pulseDimValue (default 0.45) while Claude Code is busy, only when
++            // icon-pulse is in the working-visual set (task.workIconPulse). The
++            // smooth pulse factor (0..1, cosine-eased) is stepped by iconPulseTimer
++            // (a Timer, so it works even though KDE animations are globally
++            // disabled); pulseFactor is 0 whenever not working, so opacity returns
++            // to 1.0. Bound directly on the Kirigami.Icon.
++            opacity: task.workIconPulse ? (1.0 - task.pulseFactor * (1.0 - task.pulseDimValue)) : 1.0
+         }
+ 
+         states: [
+@@ -610,39 +1358,142 @@
+         }
+     }
+ 
+-    PlasmaComponents3.Label {
+-        id: label
++    // Clipping wrapper that takes over the label's exact anchored region (icon +
++    // margins) so the child label can free-run wider than the button and scroll
++    // horizontally (hover marquee) without ElideNone bleeding past the edge.
++    // This wrapper is ANCHOR-managed (anchors.fill:parent), not Layout-managed,
++    // so it is always sized by the button width and never collapses to the
++    // child's implicitWidth — a Layout-collapsed Item would report implicitWidth
++    // 0 and make titles vanish silently; that failure mode does not apply here.
++    Item {
++        id: labelClip
+ 
+         visible: (task.inPopup || !task.tasksRoot.iconsOnly && !task.model.IsLauncher
+-            && (parent.width - iconBox.height - Kirigami.Units.smallSpacing) >= TaskManagerApplet.LayoutMetrics.spaceRequiredToShowText())
++            && (task.width - iconBox.height - Kirigami.Units.smallSpacing) >= TaskManagerApplet.LayoutMetrics.spaceRequiredToShowText())
+ 
+         anchors {
+             fill: parent
+-            leftMargin: taskFrame.margins.left + iconBox.width + TaskManagerApplet.LayoutMetrics.labelMargin
++            leftMargin: taskFrame.margins.left + iconBox.width + Math.max(2, Math.floor(TaskManagerApplet.LayoutMetrics.labelMargin / 2))
+             topMargin: taskFrame.margins.top
+             rightMargin: taskFrame.margins.right + (task.audioStreamIcon !== null && task.audioStreamIcon.visible ? (task.audioStreamIcon.width + TaskManagerApplet.LayoutMetrics.labelMargin) : 0)
+             bottomMargin: taskFrame.margins.bottom
+         }
+ 
+-        wrapMode: (maximumLineCount === 1) ? Text.NoWrap : Text.Wrap
+-        elide: Text.ElideRight
+-        textFormat: Text.PlainText
+-        verticalAlignment: Text.AlignVCenter
+-        maximumLineCount: Plasmoid.configuration.maxTextLines || undefined
+-
+-        // The accessible item of this element is only used for debugging
+-        // purposes, and it will never gain focus (thus it won't interfere
+-        // with screenreaders).
+-        Accessible.ignored: !visible
+-        Accessible.name: parent.Accessible.name + "-labelhint"
+-
+-        // use State to avoid unnecessary re-evaluation when the label is invisible
+-        states: State {
+-            name: "labelVisible"
+-            when: label.visible
++        // Clip only in the flat multi-row case, where the child free-runs at its
++        // full text width; elsewhere the child fills the wrapper and elides.
++        clip: label.flatClipLabel
++
++        PlasmaComponents3.Label {
++            id: label
++
++            visible: labelClip.visible
++
++            // In our horizontal multi-row taskbar case (same gate as
++            // task.explicitPlacement: horizontal panel, >1 row, not icons-only, not
++            // a group popup) force the title onto a SINGLE line: NoWrap +
++            // maximumLineCount 1 forbid vertical wrapping/chopping, ElideNone removes
++            // the "…" AND lets the label grow to its full text width so it can be
++            // scrolled. width binds to implicitWidth (the full text width) in that
++            // case and to the wrapper width otherwise; the clipping wrapper hides the
++            // overflow. Everywhere else keep stock wrap/elide behavior.
++            readonly property bool flatClipLabel: task.explicitPlacement
++            readonly property real overflowPx: flatClipLabel ? Math.max(0, implicitWidth - labelClip.width) : 0
++            readonly property bool clipped: overflowPx > 0
++            // Marquee scroll speed (px/s), overridable via taskbar-compact.conf.
++            readonly property real marqueeSpeed: {
++                const tl = task.tasksRoot.taskList;
++                const s = tl ? tl.cfgMarqueeSpeed : 60;
++                return s > 0 ? s : 60;
++            }
++            // Marquee start delay (ms) before scrolling begins on hover,
++            // overridable via taskbar-compact.conf. Default 400 (stock feel);
++            // 0 = instant. Clamped 0..5000. Null-safe against a missing TaskList.
++            readonly property real marqueeDelay: {
++                const tl = task.tasksRoot.taskList;
++                const d = tl ? tl.cfgMarqueeDelayMs : 400;
++                return Math.max(0, Math.min(5000, d));
++            }
++
++            anchors.verticalCenter: parent.verticalCenter
++            width: flatClipLabel ? implicitWidth : parent.width
++            height: parent.height
++
++            wrapMode: flatClipLabel ? Text.NoWrap : ((maximumLineCount === 1) ? Text.NoWrap : Text.Wrap)
++            elide: flatClipLabel ? Text.ElideNone : Text.ElideRight
++            textFormat: Text.PlainText
++            // Qt 6.12 renders this label with LCD subpixel antialiasing, which
++            // at ~10px turns into strong RGB colour fringes and unreadable text
++            // (stock Plasma text stays grayscale; the PySide test in
++            // PORTS.md#text-rendering shows stock chroma ~1 vs ~65 here).
++            // NativeRendering is the only QML-level switch that forces grayscale
++            // AA -- QtRendering, layers, opacity and hinting preference all stay
++            // subpixel, and QML cannot set QFont::NoSubpixelAntialias.
++            renderType: Text.NativeRendering
++            verticalAlignment: Text.AlignVCenter
++            maximumLineCount: flatClipLabel ? 1 : (Plasmoid.configuration.maxTextLines || undefined)
++
++            // Task label font. Overridable at runtime via
++            // ~/.config/taskbar-compact.conf (fontFamily, fontPointSize) read once
++            // by TaskList.qml at startup; missing/empty keys fall back to defaults.
++            // Default family: the theme font. Default size: 0.65x the theme default
++            // clamped to a hard 6pt floor (the theme smallestFont at 8pt rendered
++            // too tall); both hoisted into task.labelFontFamily /
++            // task.labelFontMinPt (shared with the fitMetrics measurement).
++            // When the adaptive-size feature is enabled (fontPointSizeMax) the
++            // flat multi-row labels track TaskList.appliedFontPointSize instead;
++            // popup labels and non-flat cases keep the base minimum size.
++            font.family: task.labelFontFamily
++            font.pointSize: {
++                const tl = task.tasksRoot.taskList;
++                if (tl && tl.fontAutoEnabled && label.flatClipLabel) {
++                    return tl.appliedFontPointSize;
++                }
++                return task.labelFontMinPt;
++            }
+ 
+-            PropertyChanges {
+-                label.text: task.model.display
++            // The accessible item of this element is only used for debugging
++            // purposes, and it will never gain focus (thus it won't interfere
++            // with screenreaders).
++            Accessible.ignored: !visible
++            Accessible.name: task.Accessible.name + "-labelhint"
++
++            // use State to avoid unnecessary re-evaluation when the label is invisible
++            states: State {
++                name: "labelVisible"
++                when: label.visible
++
++                PropertyChanges {
++                    label.text: task.displayText
++                }
++            }
++
++            // Hover marquee: when the button is hovered and the single-line title
++            // overflows the clip region, wait marqueeDelay ms (default 400, conf
++            // marqueeDelayMs; 0 = instant), scroll the title left at 60px/s
++            // until its end is flush with the right edge, hold 800ms, snap back to the
++            // start, pause 600ms, and loop while hovered. It touches only label.x —
++            // never a layout width — so it cannot feed back into sizing. On hover exit
++            // (running -> false) x snaps to 0 instantly.
++            SequentialAnimation {
++                id: marquee
++
++                running: label.flatClipLabel && label.clipped && label.visible && task.highlighted
++                loops: Animation.Infinite
++
++                PropertyAction { target: label; property: "x"; value: 0 }
++                PauseAnimation { duration: label.marqueeDelay }
++                NumberAnimation {
++                    target: label
++                    property: "x"
++                    to: -label.overflowPx
++                    duration: Math.max(1, Math.round(label.overflowPx / label.marqueeSpeed * 1000))
++                    easing.type: Easing.Linear
++                }
++                PauseAnimation { duration: 800 }
++                PropertyAction { target: label; property: "x"; value: 0 }
++                PauseAnimation { duration: 600 }
++
++                onRunningChanged: if (!running) label.x = 0;
+             }
+         }
+     }
+@@ -694,10 +1545,40 @@
+             taskInitComponent.createObject(task);
+         }
+         completed = true;
++        // Register with the task list once the delegate is ready. Idempotent:
++        // syncLauncherRegistration only acts when the state actually differs, so
++        // it is safe even if onCountsAsLauncherChanged already fired during init.
++        syncLauncherRegistration();
++        // Imperative pulse/flash Timer gating (see the Timers above): start the
++        // relevant Timer if the delegate is already in a working/attention state
++        // on creation, since onPulseActiveChanged / onFlashActiveChanged only fire
++        // on later transitions.
++        if (task.pulseActive) {
++            iconPulseTimer.start();
++        }
++        if (task.flashActive) {
++            attnFlashTimer.start();
++        }
++        if (task.twoStageActive) {
++            startTwoStage();
++        }
++        // Adaptive label size: make sure the arrival is aggregated even if the
++        // fit bindings settled before the delegate finished initializing.
++        if (tasksRoot.taskList) {
++            tasksRoot.taskList.fitRevision++;
++        }
+     }
+     Component.onDestruction: {
+         if (moveAnim.running) {
+             (task.parent as TaskList).animationsRunning -= 1;
+         }
++        if (launcherRegistered && tasksRoot.taskList) {
++            tasksRoot.taskList.launcherCount -= 1;
++            launcherRegistered = false;
++        }
++        // Adaptive label size: departures re-aggregate too.
++        if (tasksRoot.taskList) {
++            tasksRoot.taskList.fitRevision++;
++        }
+     }
+ }
+--- a/applets/taskmanager/qml/TaskList.qml
++++ b/applets/taskmanager/qml/TaskList.qml
+@@ -6,14 +6,252 @@
+ 
+ import QtQuick
+ import QtQuick.Layouts
++import QtCore
+ 
+ import org.kde.plasma.plasmoid
+ import org.kde.plasma.core as PlasmaCore
++import org.kde.kirigami as Kirigami
+ import plasma.applet.org.kde.plasma.taskmanager as TaskManagerApplet
+ 
+ GridLayout {
+     property bool animating: false
+ 
++    // Optional runtime overrides read once at startup from
++    // ~/.config/taskbar-compact.conf, parsed as INI by QtCore Settings
++    // (QSettings). Keys, all optional (defaults are the property values below):
++    //   fontFamily    - task label font family        (default "": theme font, via Task.qml)
++    //   fontPointSize - task label point size          (default 0: computed, see Task.qml)
++    //   fontPointSizeMax - adaptive label size upper bound in pt (default 0:
++    //                   feature DISABLED; also disabled when <= the effective
++    //                   minimum size, i.e. fontPointSize or the computed default)
++    //   fontAutoStepPt - adaptive-size quantization step in pt (default 0.5;
++    //                   non-positive falls back to 0.5)
++    //   fontAutoDebounceMs - adaptive-size recompute debounce in ms (default 500;
++    //                   clamped 0..10000; 0 = apply immediately)
++    //   fontAutoAggregate - adaptive-size aggregation over tasks: "mean" (default)
++    //                   or "min"; anything else falls back to "mean"
++    //   fontAutoHysteresisPt - adaptive-size hysteresis in pt: a recomputed size
++    //                   only replaces the applied one when it differs by at
++    //                   least this much (default 0 = every change applies)
++    //   wheelVolume   - true: mouse wheel anywhere over the taskbar changes the
++    //                   system (default sink) volume with the plasma-pa OSD;
++    //                   Shift = fine step. Replaces the stock wheelEnabled
++    //                   behavior. Default false. See MouseHandler.qml.
++    //   marqueeSpeed  - hover-marquee scroll px/s       (default 60)
++    //   marqueeDelayMs- hover-marquee start delay in ms  (default 400; 0 = instant;
++    //                   clamped 0..5000 downstream in Task.qml)
++    // Keys live in the INI's default (General) group -- plain "key=value" lines
++    // at the top of the file. A missing file or missing key keeps the default; a
++    // present-but-empty fontFamily / a non-positive number is ignored downstream
++    // in Task.qml, so a malformed value can never blank the buttons. The file is
++    // only read, never written. A plasmashell restart re-reads it; no watcher.
++    //
++    // QSettings is used rather than an XMLHttpRequest file:// GET, which Qt 6
++    // disables by default (needs QML_XHR_ALLOW_FILE_READ=1 in the process env).
++    Settings {
++        id: taskbarCompactConfig
++        location: StandardPaths.writableLocation(StandardPaths.GenericConfigLocation) + "/taskbar-compact.conf"
++        property string fontFamily: ""
++        property real fontPointSize: 0
++        // Adaptive task-label font size (see effectiveFontMinPt /
++        // recomputeAppliedFont below and the fit machinery in Task.qml).
++        // fontPointSizeMax <= the effective minimum size (incl. the default 0)
++        // disables the feature entirely.
++        property real fontPointSizeMax: 0
++        property real fontAutoStepPt: 0.5
++        property int fontAutoDebounceMs: 500
++        property string fontAutoAggregate: "mean"
++        property real fontAutoHysteresisPt: 0
++        // Wheel-anywhere global volume (see MouseHandler.qml). false = stock
++        // wheel behavior (the wheelEnabled applet setting).
++        property bool wheelVolume: false
++        property real marqueeSpeed: 60
++        // Hover-marquee start delay in ms before scrolling begins on hover.
++        // Default 400 (stock feel); 0 = scrolling starts the instant the pointer
++        // hovers. Clamped 0..5000 downstream in Task.qml.
++        property real marqueeDelayMs: 400
++        // Claude Code state-visual style, switchable at runtime (no rebuild):
++        //   claudeStyle  - "icon-pulse" (S6, default) | "bevel" (S3) | "both"
++        //   pulsePeriodMs - full working-pulse cycle in ms
++        //   pulseDim      - icon-pulse dim opacity (0<d<1)
++        //   pulseSteps    - ticks per cycle for the smooth cosine-eased pulse;
++        //                   Timer interval = pulsePeriodMs / pulseSteps. Higher =
++        //                   smoother. 2 reproduces the old 2-state blink. Clamped
++        //                   2..60 downstream in Task.qml. Default 16.
++        //   bevelBreathe  - true (default): the S3 bevel brightness breathes on the
++        //                   same phase; false: bevel stays static while working
++        //                   (icon pulse unaffected).
++        // Missing/invalid values fall back to these defaults downstream in Task.qml.
++        //
++        // Freely mixable Claude visuals (supersede claudeStyle; claudeStyle is a
++        // legacy alias used only to DERIVE these when they are empty):
++        //   workingVisual   - comma-separated list, any of {icon-pulse, tint-pulse,
++        //                     underline, bevel, edge-bar, none}
++        //   attentionVisual - one of {fill, flash, two-stage, underline, bevel,
++        //                     edge-bar, none}
++        //   flashPeriodMs   - full S5 attention-flash square-wave cycle in ms
++        //   attentionIntroMs      - two-stage attention intro (stage 1) duration in
++        //                     ms; 0 = skip the intro entirely. Clamped 0..60000
++        //                     downstream in Task.qml. Default 5000.
++        //   attentionLatchPeriodMs - two-stage attention latch (stage 2) pulse
++        //                     period in ms. Clamped 200..60000 downstream in
++        //                     Task.qml. Default 3000.
++        //   workingColor    - base color for ALL working visuals (tint-pulse fill,
++        //                     underline, edge-bar, bevel breathe tint; icon-pulse is
++        //                     opacity-only, unaffected). "" = theme highlightColor.
++        //   attentionColor  - base color for ALL attention visuals (fill, flash,
++        //                     underline, bevel, edge-bar+wash). "" = theme
++        //                     neutralTextColor. Any string QML's color parser takes
++        //                     (#RRGGBB, named); unparseable/empty falls back to theme.
++        //   fillRadius      - corner radius of the flat button fills (stateFill,
++        //                     washFill, S3 bevel background). 0 = square corners.
++        //                     Clamped 0..10 downstream in Task.qml. Default 3.
++        //                     The underline/edge-bar bars are unaffected.
++        property string claudeStyle: "icon-pulse"
++        // var (not string): QSettings parses an UNQUOTED comma value in the INI
++        // (e.g. workingVisual=underline,icon-pulse, or a workingColor=rgb(255,0,255))
++        // as a QStringList, and coercing that into a string property silently blanks
++        // it. Keeping these as var and re-joining with "," (see cfg* below) accepts
++        // both the plain unquoted comma form and a single value, and round-trips.
++        property var workingVisual: ""
++        property string attentionVisual: ""
++        property var workingColor: ""
++        property var attentionColor: ""
++        property real flashPeriodMs: 2400
++        property int attentionIntroMs: 5000
++        property int attentionLatchPeriodMs: 3000
++        property real fillRadius: 3
++        property real pulsePeriodMs: 1600
++        property real pulseDim: 0.45
++        property int pulseSteps: 16
++        property bool bevelBreathe: true
++    }
++    readonly property string cfgFontFamily: taskbarCompactConfig.fontFamily
++    readonly property real cfgFontPointSize: taskbarCompactConfig.fontPointSize
++    readonly property real cfgFontPointSizeMax: taskbarCompactConfig.fontPointSizeMax
++    readonly property real cfgFontAutoStepPt: taskbarCompactConfig.fontAutoStepPt
++    readonly property int cfgFontAutoDebounceMs: taskbarCompactConfig.fontAutoDebounceMs
++    readonly property string cfgFontAutoAggregate: taskbarCompactConfig.fontAutoAggregate
++    readonly property real cfgFontAutoHysteresisPt: taskbarCompactConfig.fontAutoHysteresisPt
++    readonly property bool cfgWheelVolume: taskbarCompactConfig.wheelVolume === true || taskbarCompactConfig.wheelVolume === "true"
++    readonly property real cfgMarqueeSpeed: taskbarCompactConfig.marqueeSpeed
++    readonly property real cfgMarqueeDelayMs: taskbarCompactConfig.marqueeDelayMs
++    readonly property string cfgClaudeStyle: taskbarCompactConfig.claudeStyle
++    // Normalize a QSettings value that may arrive as a plain string OR (for an
++    // unquoted comma value) a QStringList, back into a single comma-joined string.
++    function cfgJoin(v) {
++        if (v === undefined || v === null) {
++            return "";
++        }
++        if (Array.isArray(v)) {
++            return v.join(",");
++        }
++        return String(v);
++    }
++    readonly property string cfgWorkingVisual: cfgJoin(taskbarCompactConfig.workingVisual)
++    readonly property string cfgAttentionVisual: taskbarCompactConfig.attentionVisual
++    readonly property string cfgWorkingColor: cfgJoin(taskbarCompactConfig.workingColor)
++    readonly property string cfgAttentionColor: cfgJoin(taskbarCompactConfig.attentionColor)
++    readonly property real cfgFlashPeriodMs: taskbarCompactConfig.flashPeriodMs
++    readonly property int cfgAttentionIntroMs: taskbarCompactConfig.attentionIntroMs
++    readonly property int cfgAttentionLatchPeriodMs: taskbarCompactConfig.attentionLatchPeriodMs
++    readonly property real cfgFillRadius: taskbarCompactConfig.fillRadius
++    readonly property real cfgPulsePeriodMs: taskbarCompactConfig.pulsePeriodMs
++    readonly property real cfgPulseDim: taskbarCompactConfig.pulseDim
++    readonly property int cfgPulseSteps: taskbarCompactConfig.pulseSteps
++    readonly property bool cfgBevelBreathe: taskbarCompactConfig.bevelBreathe
++
++    // Adaptive task-label font size: the effective label size auto-floats
++    // between effectiveFontMinPt and cfgFontPointSizeMax based on how much of
++    // each visible task title fits its label clip (see the fitEligible /
++    // fitPointSize machinery in Task.qml). Delegates bump fitRevision whenever
++    // their fit changes; after a debounce the per-task ideal sizes are
++    // aggregated ("mean" or "min"), quantized DOWN to cfgFontAutoStepPt
++    // anchored at the minimum, clamped, and published as appliedFontPointSize
++    // for the labels to consume. Feature is fully inert (byte-identical label
++    // behavior) unless cfgFontPointSizeMax exceeds the effective minimum.
++    //
++    // effectiveFontMinPt hoists the label's minimum-size computation from
++    // Task.qml: an explicit fontPointSize wins, else 0.65x the theme default
++    // clamped to a hard 6pt floor. Null-safe against a missing
++    // Kirigami.Theme.defaultFont (kdeglobals fonts-reset incident).
++    readonly property real effectiveFontMinPt: cfgFontPointSize > 0
++        ? cfgFontPointSize
++        : Math.max(6, (Kirigami.Theme.defaultFont ? Kirigami.Theme.defaultFont.pointSize : 10) * 0.65)
++    readonly property bool fontAutoEnabled: cfgFontPointSizeMax > effectiveFontMinPt
++    // Bumped by the Task delegates whenever their fit changes (fit size,
++    // eligibility, creation, destruction) so departures re-aggregate too.
++    property int fitRevision: 0
++    // Deliberately NOT a live binding: reassigned imperatively by
++    // recomputeAppliedFont() (initialized via Component.onCompleted below).
++    property real appliedFontPointSize: effectiveFontMinPt
++
++    onFitRevisionChanged: {
++        if (!fontAutoEnabled) {
++            return;
++        }
++        if (Math.max(0, Math.min(10000, cfgFontAutoDebounceMs)) <= 0) {
++            recomputeAppliedFont();
++        } else {
++            fontAutoDebounce.restart();
++        }
++    }
++
++    // Debounce for the fit re-aggregation. Started imperatively via restart()
++    // from onFitRevisionChanged (a `running:` binding on a Timer is unreliable
++    // on this desktop). Timer needs interval >= 1; the 0-debounce case never
++    // reaches the Timer (recomputeAppliedFont is called directly above).
++    Timer {
++        id: fontAutoDebounce
++        interval: Math.max(1, Math.min(10000, cfgFontAutoDebounceMs))
++        repeat: false
++        running: false
++        onTriggered: recomputeAppliedFont()
++    }
++
++    function recomputeAppliedFont() {
++        if (!fontAutoEnabled) {
++            appliedFontPointSize = effectiveFontMinPt;
++            return;
++        }
++        // Imperative scan (no dependency tracking wanted here): aggregate the
++        // per-delegate ideal sizes of all currently fit-eligible tasks.
++        let sum = 0;
++        let count = 0;
++        let minPt = Infinity;
++        for (let i = 0; i < children.length; ++i) {
++            const child = children[i];
++            if (child.fitEligible === true && typeof child.fitPointSize === "number") {
++                sum += child.fitPointSize;
++                count += 1;
++                minPt = Math.min(minPt, child.fitPointSize);
++            }
++        }
++        const maxPt = cfgFontPointSizeMax;
++        const aggregate = cfgFontAutoAggregate === "min" ? "min" : "mean";
++        let raw = count === 0 ? maxPt : (aggregate === "min" ? minPt : sum / count);
++        // Quantize DOWN to the step, anchored at the minimum size (the 1e-6
++        // epsilon keeps exact multiples from flooring one step too low).
++        const step = cfgFontAutoStepPt > 0 ? cfgFontAutoStepPt : 0.5;
++        raw = effectiveFontMinPt + Math.floor((raw - effectiveFontMinPt) / step + 1e-6) * step;
++        const candidate = Math.max(effectiveFontMinPt, Math.min(maxPt, raw));
++        // Hysteresis: ignore candidates that differ from the currently applied
++        // size by less than cfgFontAutoHysteresisPt, so small drift in the
++        // aggregate (a title change, one task more or less while sitting near a
++        // quantize boundary) cannot make the size hop. An applied size OUTSIDE
++        // the configured [min,max] (bounds changed at runtime) is always
++        // replaced. 0 (default) = apply every change (pre-hysteresis behavior).
++        const hyst = Math.max(0, cfgFontAutoHysteresisPt);
++        const appliedInBounds = appliedFontPointSize >= effectiveFontMinPt - 1e-6
++            && appliedFontPointSize <= maxPt + 1e-6;
++        if (appliedInBounds && Math.abs(candidate - appliedFontPointSize) < hyst - 1e-6) {
++            return;
++        }
++        appliedFontPointSize = candidate;
++    }
++
++    Component.onCompleted: recomputeAppliedFont()
++
+     rowSpacing: 0
+     columnSpacing: 0
+ 
+@@ -30,6 +268,51 @@
+         .filter(item => item.visible && item.width > 0)
+         .reduce((minimumWidth, item) => Math.min(minimumWidth, item.width), Infinity)
+ 
++    // Number of currently visible launcher items in the main task list. They
++    // are contiguous at the front of the model when separateLaunchers is in
++    // effect. Maintained by the Task delegates registering/unregistering
++    // themselves (see Task.qml) through notifiable per-delegate signals, so the
++    // value is correct immediately after a quiet restart (a parent-side reduce
++    // over children has no dependency tracking and can latch at the L=0
++    // degenerate case before the delegates are ready).
++    property int launcherCount: 0
++
++    // Grid-placement epoch (taskbar-compact): bumped after every structural
++    // change to the model or to launcherCount, deferred until the change storm
++    // settles. Task.qml's explicit Layout.row/column bindings read this
++    // property, so one bump makes every delegate re-evaluate its cell in a
++    // single layout pass against a consistent snapshot of (launcherCount,
++    // count, index). Without this, a storm (drag reorder, window open/close,
++    // the launcher-registration ramp) can leave two delegates permanently
++    // mapped onto one cell: GridLayout refuses the second ("addItem ... cell
++    // already taken"), parks it at the next free cell -- which is a third row
++    // on a two-row layout -- and never retries.
++    property int layoutEpoch: 0
++    Timer {
++        id: layoutBumpTimer
++        interval: 0
++        repeat: false
++        running: false
++        onTriggered: layoutEpoch++
++    }
++    function bumpLayout(): void {
++        layoutBumpTimer.restart();
++    }
++    onLauncherCountChanged: bumpLayout()
++
++    // Cycle-free layout metrics (taskbar-compact): stripeCount below reads
++    // these instead of the item's own width/height. The item's size is bound
++    // (main.qml) to the sum of its children's Layout.maximumWidth, and the
++    // launcher max-width is tasksRoot.height / rows -- i.e. rows feeds back
++    // into the item width, which fed back into rows ("Binding loop detected
++    // for stripeCount", and rows flickered 1<->2 during storms, churning the
++    // whole grid). main.qml overrides both with the applet root's size, which
++    // is panel-determined and independent of the launcher widths, so the
++    // cycle is gone while the row estimate stays equivalent (the tasklist
++    // fills the applet width whenever there is any occupancy).
++    property real layoutWidth: width
++    property real layoutHeight: parent.height
++
+     readonly property int stripeCount: {
+         if (Plasmoid.configuration.maxStripes === 1) {
+             return 1;
+@@ -40,15 +323,15 @@
+ 
+         // The maximum number of stripes allowed by the applet's size
+         const stripeSizeLimit = vertical
+-            ? Math.floor(parent.width / children[0].implicitWidth)
+-            : Math.floor(parent.height / children[0].implicitHeight)
++            ? Math.floor(layoutWidth / children[0].implicitWidth)
++            : Math.floor(layoutHeight / children[0].implicitHeight)
+         const maxStripes = Math.min(Plasmoid.configuration.maxStripes, stripeSizeLimit)
+ 
+ 
+         // The number of tasks that will fill a "stripe" before starting the next one
+         const maxTasksPerStripe = vertical
+-            ? Math.ceil(parent.height / TaskManagerApplet.LayoutMetrics.preferredMinHeight())
+-            : Math.ceil(parent.width / TaskManagerApplet.LayoutMetrics.preferredMinWidth())
++            ? Math.ceil(layoutHeight / TaskManagerApplet.LayoutMetrics.preferredMinHeight())
++            : Math.ceil(layoutWidth / TaskManagerApplet.LayoutMetrics.preferredMinWidth())
+ 
+         return Math.min(Math.ceil(count / maxTasksPerStripe), maxStripes)
+     }
+@@ -58,5 +341,23 @@
+     }
+ 
+     rows: vertical ? orthogonalCount : stripeCount
+-    columns: vertical ? stripeCount : orthogonalCount
++
++    // Gate mirrors Task.qml explicitPlacement.
++    readonly property bool iconsOnly: Plasmoid.pluginName === "org.kde.plasma.icontasks"
++
++    // Column count must cover the split placement done in Task.qml: launchers
++    // packed into ceil(L/R) narrow columns plus tasks in max(1, ceil(T/R))
++    // columns. When L and T are both odd that sum exceeds the stock
++    // ceil(count/R) by one; GridLayout rejects any explicit Layout.column >=
++    // columns ("Layout: column (N) should be less than the number of columns")
++    // and silently auto-places the item, which made the last task overlap a
++    // neighbour. Outside the gated case this returns the stock expression.
++    columns: {
++        if (!vertical && !iconsOnly && stripeCount > 1) {
++            const taskCount = count - launcherCount;
++            return Math.ceil(launcherCount / stripeCount)
++                + Math.max(1, Math.ceil(taskCount / stripeCount));
++        }
++        return vertical ? stripeCount : orthogonalCount;
++    }
+ }
+--- a/applets/taskmanager/qml/main.qml
++++ b/applets/taskmanager/qml/main.qml
+@@ -462,6 +462,33 @@
+ 
+                 count: tasksModel.count
+ 
++                // taskbar-compact: feed the stripeCount math the applet root's
++                // size instead of this item's own width/height -- the item's
++                // size depends on the launcher widths, which depend on rows,
++                // which depend on this size: a binding loop. The root's size is
++                // panel-determined, so the cycle is broken.
++                layoutWidth: tasks.width
++                layoutHeight: tasks.height
++
++                // taskbar-compact: structural model changes re-run the explicit
++                // grid-placement pass once the storm settles (see the layoutEpoch
++                // machinery in TaskList.qml / Task.qml).
++                Connections {
++                    target: tasksModel
++                    function onRowsInserted(): void {
++                        taskList.bumpLayout();
++                    }
++                    function onRowsRemoved(): void {
++                        taskList.bumpLayout();
++                    }
++                    function onRowsMoved(): void {
++                        taskList.bumpLayout();
++                    }
++                    function onModelReset(): void {
++                        taskList.bumpLayout();
++                    }
++                }
++
+                 readonly property real widthOccupation: taskRepeater.count / columns
+                 readonly property real heightOccupation: taskRepeater.count / rows
+ 
+--- a/applets/taskmanager/qml/MouseHandler.qml
++++ b/applets/taskmanager/qml/MouseHandler.qml
+@@ -167,7 +167,9 @@
+ 
+         property bool handleWheelEvents: true
+ 
+-        enabled: handleWheelEvents && Plasmoid.configuration.wheelEnabled !== 0
++        // taskbar-compact: wheelVolume keeps the handler alive even with the
++        // stock wheel behavior configured off.
++        enabled: handleWheelEvents && (Plasmoid.configuration.wheelEnabled !== 0 || tasks.taskList.cfgWheelVolume)
+ 
+         onWheel: event => {
+             // magic number 15 for common "one scroll"
+@@ -181,6 +183,22 @@
+                 rotation += 15;
+                 increment--;
+             }
++            // taskbar-compact: wheelVolume=true in ~/.config/taskbar-compact.conf
++            // reroutes the wheel anywhere over the taskbar to the GLOBAL default
++            // sink volume via plasma-pa's GlobalService (same step/OSD/audible
++            // feedback as scrolling the tray volume icon; Shift = fine step).
++            // Bypasses the stock wheelEnabled modes. Routed through the
++            // pulseAudio Loader so a missing plasma-pa degrades to a no-op.
++            if (tasks.taskList.cfgWheelVolume) {
++                const small = (event.modifiers & Qt.ShiftModifier) !== 0;
++                for (; increment > 0; --increment) {
++                    pulseAudio.item?.volumeUp(small);
++                }
++                for (; increment < 0; ++increment) {
++                    pulseAudio.item?.volumeDown(small);
++                }
++                return;
++            }
+             const anchor = dropArea.target.childAt(event.x, event.y);
+             if (Plasmoid.configuration.wheelEnabled === 3) {
+                 const loudest = anchor?.audioStreams?.reduce((loudest, stream) => Math.max(loudest, stream.volume), 0)
+--- a/applets/taskmanager/qml/PulseAudio.qml
++++ b/applets/taskmanager/qml/PulseAudio.qml
+@@ -37,6 +37,26 @@
+         return pidMatches.has(appName);
+     }
+ 
++    // taskbar-compact wheelVolume: global default-sink volume via plasma-pa's
++    // GlobalService singleton, which handles bounds, the configured step, the
++    // OSD and audible feedback exactly like the tray volume icon and the
++    // global volume shortcuts.
++    function volumeUp(small: bool) {
++        if (small) {
++            PlasmaPa.GlobalService.volumeUpSmall();
++        } else {
++            PlasmaPa.GlobalService.volumeUp();
++        }
++    }
++
++    function volumeDown(small: bool) {
++        if (small) {
++            PlasmaPa.GlobalService.volumeDownSmall();
++        } else {
++            PlasmaPa.GlobalService.volumeDown();
++        }
++    }
++
+     function findStreams(key: string, value: var): /*[QtObject]*/ var {
+         return findStreamsFn(stream => stream[key] === value);
+     }

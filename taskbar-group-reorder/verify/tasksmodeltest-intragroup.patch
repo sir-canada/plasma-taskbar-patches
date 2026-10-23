@@ -1,0 +1,131 @@
+--- a/libtaskmanager/autotests/tasksmodeltest.cpp	2026-07-13 21:34:09.133435599 +0300
++++ b/libtaskmanager/autotests/tasksmodeltest.cpp	2026-07-13 21:32:17.086917081 +0300
+@@ -5,6 +5,7 @@
+ */
+ 
+ #include <QQmlApplicationEngine>
++#include <QRasterWindow>
+ #include <QSignalSpy>
+ #include <QTest>
+ 
+@@ -42,6 +43,14 @@
+      * @see https://bugs.kde.org/436667
+      */
+     void test_filterOutInvalidPreferredLaunchers();
++
++    /**
++     * taskbar-group-reorder: reordering window buttons WITHIN an inline
++     * (groupInline / groupPopups=false) group, and the PLASMA_INTRA_GROUP_MOVES
++     * runtime kill-switch. Config mirrors the user's applet:
++     * SortManual + GroupApplications + groupInline.
++     */
++    void test_intraGroupMove();
+ };
+ 
+ void TasksModelTest::initTestCase()
+@@ -194,6 +203,105 @@
+     QCOMPARE(model.launcherList().size(), 1);
+ }
+ 
++void TasksModelTest::test_intraGroupMove()
++{
++    // Windows created in-process share this app id, so GroupApplications groups
++    // them into one inline cluster.
++    QGuiApplication::setDesktopFileName(QStringLiteral("org.kde.plasma.test.dummy"));
++
++    TasksModel model;
++    model.setSortMode(TasksModel::SortManual);
++    model.setGroupMode(TasksModel::GroupApplications);
++    model.setGroupInline(true);
++
++    auto mkWindow = [](const QString &title) {
++        auto w = std::make_unique<QRasterWindow>();
++        w->setTitle(title);
++        w->resize(320, 240);
++        w->show();
++        return w;
++    };
++
++    QSignalSpy rowsInsertedSpy(&model, &TasksModel::rowsInserted);
++    const QStringList titles{QStringLiteral("GRWIN_A"), QStringLiteral("GRWIN_B"), QStringLiteral("GRWIN_C")};
++    std::vector<std::unique_ptr<QRasterWindow>> windows;
++    for (const QString &t : titles) {
++        windows.push_back(mkWindow(t));
++    }
++
++    // Wait until all three window tasks have surfaced.
++    auto ourRows = [&]() {
++        QList<int> rows;
++        for (int i = 0; i < model.rowCount(); ++i) {
++            if (titles.contains(model.index(i, 0).data(Qt::DisplayRole).toString())) {
++                rows.append(i);
++            }
++        }
++        return rows;
++    };
++    for (int tries = 0; tries < 50 && ourRows().size() < 3; ++tries) {
++        rowsInsertedSpy.wait(200);
++    }
++
++    auto dump = [&](const char *tag) {
++        qDebug() << "===" << tag << "rowCount=" << model.rowCount();
++        for (int i = 0; i < model.rowCount(); ++i) {
++            const QModelIndex idx = model.index(i, 0);
++            qDebug() << i << idx.data(Qt::DisplayRole).toString() << "isGroupParent=" << idx.data(AbstractTasksModel::IsGroupParent).toBool()
++                     << "childCount=" << model.rowCount(idx);
++        }
++    };
++    dump("initial");
++
++    QList<int> rows = ourRows();
++    QCOMPARE(rows.size(), 3);
++    // In inline mode the three windows are contiguous top-level rows.
++    QCOMPARE(rows.at(1), rows.at(0) + 1);
++    QCOMPARE(rows.at(2), rows.at(0) + 2);
++
++    auto order = [&]() {
++        QStringList o;
++        for (int r : ourRows()) {
++            o << model.index(r, 0).data(Qt::DisplayRole).toString();
++        }
++        return o;
++    };
++    const QStringList before = order();
++    qDebug() << "BEFORE order:" << before;
++
++    // --- Feature ON (default): move the MIDDLE window to the FRONT of the cluster.
++    qunsetenv("PLASMA_INTRA_GROUP_MOVES");
++    const int mid = rows.at(1);
++    const int front = rows.at(0);
++    const bool moved = model.move(mid, front);
++    QCoreApplication::processEvents();
++    const QStringList afterOn = order();
++    qDebug() << "move(mid->front) returned" << moved << "-> order" << afterOn;
++    QVERIFY2(moved, "Intra-group move must succeed with the feature ON");
++    QCOMPARE(afterOn.at(0), before.at(1)); // middle window is now first
++    QVERIFY(afterOn != before);
++    // Still exactly three contiguous rows (group contiguity preserved).
++    QList<int> rowsAfter = ourRows();
++    QCOMPARE(rowsAfter.size(), 3);
++    QCOMPARE(rowsAfter.at(1), rowsAfter.at(0) + 1);
++    QCOMPARE(rowsAfter.at(2), rowsAfter.at(0) + 2);
++
++    // --- Kill-switch OFF: the same kind of move must be refused (historical behaviour).
++    qputenv("PLASMA_INTRA_GROUP_MOVES", "0");
++    const QStringList beforeOff = order();
++    const bool movedOff = model.move(rowsAfter.at(0), rowsAfter.at(2));
++    QCoreApplication::processEvents();
++    const QStringList afterOff = order();
++    qDebug() << "kill-switch OFF: move returned" << movedOff << "order" << beforeOff << "->" << afterOff;
++    QVERIFY2(!movedOff, "Intra-group move must be refused with PLASMA_INTRA_GROUP_MOVES=0");
++    QCOMPARE(afterOff, beforeOff); // order unchanged
++    qunsetenv("PLASMA_INTRA_GROUP_MOVES");
++
++    for (auto &w : windows) {
++        w->close();
++    }
++}
++
+ QTEST_MAIN(TasksModelTest)
+ 
+ #include "tasksmodeltest.moc"

@@ -1,0 +1,60 @@
+--- a/libtaskmanager/tasksmodel.cpp	2026-07-13 21:14:34.932952321 +0300
++++ b/libtaskmanager/tasksmodel.cpp	2026-07-13 21:14:23.102361469 +0300
+@@ -1714,8 +1714,56 @@
+         QModelIndex groupingNewPosIndex = d->flattenGroupsProxyModel->mapToSource(mapToSource(index(newPos, 0)));
+         const QModelIndex &groupingNewPosIndexParent = groupingNewPosIndex.parent();
+ 
+-        // Disallow moves within a flattened-out group (TODO: for now, anyway).
++        // Moves that both start and end inside the SAME flattened-out (inline) group.
+         if (groupingRowIndexParent.isValid() && (groupingRowIndexParent == groupingNewPosIndex || groupingRowIndexParent == groupingNewPosIndexParent)) {
++            // taskbar-group-reorder: allow real reordering of members WITHIN an inline
++            // group instead of refusing the move. Cross-group / cross-cluster moves and
++            // the "flattened group behaves as one atomic item" behaviour below are left
++            // completely untouched, so bugs 444816 / 448912 and commit ea51795e stay fixed.
++            //
++            // Runtime kill-switch: PLASMA_INTRA_GROUP_MOVES=0 restores the historical
++            // refusal (no rebuild needed, just a plasmashell restart). Unset / "1" = on.
++            const bool intraGroupMovesEnabled =
++                qEnvironmentVariable("PLASMA_INTRA_GROUP_MOVES", QStringLiteral("1")) != QLatin1String("0");
++
++            // Only genuine child->child moves inside one and the same group parent are
++            // reorderable. The degenerate "target is the group parent itself" case (which
++            // cannot normally occur, since inline group parents are filtered out of this
++            // model) keeps the old refusal.
++            if (intraGroupMovesEnabled && groupingRowIndexParent == groupingNewPosIndexParent) {
++                // Manual-sort display order is driven solely by the position of a task's
++                // pre-filter (concat) row inside d->sortedPreFilterRows (see lessThan()).
++                // Group members are kept contiguous there by consolidateManualSortMapForGroup();
++                // moving one member to another slot inside that contiguous run permutes only
++                // within the run, so the group stays contiguous and no other group is touched.
++                const int fromSort = d->sortedPreFilterRows.indexOf(
++                    d->filterProxyModel->mapToSource(d->groupingProxyModel->mapToSource(groupingRowIndex)).row());
++                const int toSort = d->sortedPreFilterRows.indexOf(
++                    d->filterProxyModel->mapToSource(d->groupingProxyModel->mapToSource(groupingNewPosIndex)).row());
++
++                if (fromSort < 0 || toSort < 0) {
++                    return false;
++                }
++
++                beginMoveRows(QModelIndex(), row, row, QModelIndex(), (newPos > row) ? newPos + 1 : newPos);
++
++                d->sortedPreFilterRows.move(fromSort, toSort);
++
++                endMoveRows();
++
++                // NOTE: deliberately NOT calling consolidateManualSortMapForGroup() here.
++                // That helper re-imposes groupingProxyModel's (insertion) child order and
++                // would immediately undo the user's manual reorder. Contiguity is preserved
++                // by construction (see above), so re-consolidation is unnecessary.
++                //
++                // The new order is session-scoped: it is held only in sortedPreFilterRows
++                // and is reset to insertion order if the group's membership later changes
++                // (rowsInserted -> consolidateManualSortMapForGroup) or on plasmashell
++                // restart. Window task order is never persisted upstream by design.
++                d->forceResort();
++                return true;
++            }
++
+             return false;
+         }
+ 

@@ -1,0 +1,40 @@
+; Example ~/.config/taskbar-compact.conf — runtime config for the patched
+; Task Manager applet. All keys optional; missing keys use built-in defaults.
+; Read once at plasmashell start; apply changes with:
+;   systemctl --user restart plasma-plasmashell.service
+; NOTE: QSettings owns this file — edit only while plasmashell is stopped,
+; and don't expect comments to survive (see README, "Runtime config").
+
+[General]
+; Label font
+fontFamily=DejaVu Sans
+fontPointSize=7.5
+; Adaptive label sizing (0 = off)
+fontPointSizeMax=9
+fontAutoStepPt=0.5
+fontAutoDebounceMs=500
+fontAutoAggregate=mean
+fontAutoHysteresisPt=1.0
+
+; Hover marquee
+marqueeSpeed=50
+marqueeDelayMs=0
+
+; Claude/busy state visuals
+workingVisual=icon-pulse
+attentionVisual=two-stage
+attentionIntroMs=12500
+attentionLatchPeriodMs=3000
+workingColor=
+attentionColor=
+pulsePeriodMs=2400
+pulseDim=0.45
+pulseSteps=32
+flashPeriodMs=2400
+bevelBreathe=true
+
+; Button look
+fillRadius=0
+
+; Mouse wheel over taskbar = system volume (Shift = fine step)
+wheelVolume=true

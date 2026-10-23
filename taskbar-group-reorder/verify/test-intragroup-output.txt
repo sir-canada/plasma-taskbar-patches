@@ -1,0 +1,15 @@
+********* Start testing of TasksModelTest *********
+Config: Using QtTest library 6.11.1, Qt 6.11.1 (x86_64-little_endian-lp64 shared (dynamic) release build; by GCC 16.1.1 20260430), cachyos unknown
+PASS   : TasksModelTest::initTestCase()
+QDEBUG : TasksModelTest::test_intraGroupMove() === initial rowCount= 3
+QDEBUG : TasksModelTest::test_intraGroupMove() 0 "GRWIN_A" isGroupParent= false childCount= 0
+QDEBUG : TasksModelTest::test_intraGroupMove() 1 "GRWIN_B" isGroupParent= false childCount= 0
+QDEBUG : TasksModelTest::test_intraGroupMove() 2 "GRWIN_C" isGroupParent= false childCount= 0
+QDEBUG : TasksModelTest::test_intraGroupMove() BEFORE order: QList("GRWIN_A", "GRWIN_B", "GRWIN_C")
+QDEBUG : TasksModelTest::test_intraGroupMove() move(mid->front) returned true -> order QList("GRWIN_B", "GRWIN_A", "GRWIN_C")
+QDEBUG : TasksModelTest::test_intraGroupMove() kill-switch OFF: move returned false order QList("GRWIN_B", "GRWIN_A", "GRWIN_C") -> QList("GRWIN_B", "GRWIN_A", "GRWIN_C")
+PASS   : TasksModelTest::test_intraGroupMove()
+PASS   : TasksModelTest::cleanupTestCase()
+Totals: 3 passed, 0 failed, 0 skipped, 0 blacklisted, 61ms
+********* Finished testing of TasksModelTest *********
+TESTRC=0

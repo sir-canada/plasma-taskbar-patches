@@ -1,0 +1,30 @@
+********* Start testing of TasksModelTest *********
+Config: Using QtTest library 6.11.1, Qt 6.11.1 (x86_64-little_endian-lp64 shared (dynamic) release build; by GCC 16.1.1 20260430), cachyos unknown
+PASS   : TasksModelTest::initTestCase()
+PASS   : TasksModelTest::test_moveLauncherBug472524()
+QDEBUG : TasksModelTest::test_moveBug444816() ********* BEGIN Before *********
+QDEBUG : TasksModelTest::test_moveBug444816() 0 "GammaRay"
+QDEBUG : TasksModelTest::test_moveBug444816() 1 "__testwindow__firstwindow__"
+QDEBUG : TasksModelTest::test_moveBug444816() 2 "__testwindow__secondwindow__"
+QDEBUG : TasksModelTest::test_moveBug444816() ********* End Before *********
+QDEBUG : TasksModelTest::test_moveBug444816() ********* BEGIN After *********
+QDEBUG : TasksModelTest::test_moveBug444816() 0 "__testwindow__firstwindow__"
+QDEBUG : TasksModelTest::test_moveBug444816() 1 "GammaRay"
+QDEBUG : TasksModelTest::test_moveBug444816() 2 "__testwindow__secondwindow__"
+QDEBUG : TasksModelTest::test_moveBug444816() ********* END After *********
+PASS   : TasksModelTest::test_moveBug444816()
+QWARN  : TasksModelTest::test_filterOutInvalidPreferredLaunchers() kf.service.services: KApplicationTrader: mimeType "nonexistent" not found
+QWARN  : TasksModelTest::test_filterOutInvalidPreferredLaunchers() kf.service.services: KApplicationTrader: mimeType "nonexistent" not found
+PASS   : TasksModelTest::test_filterOutInvalidPreferredLaunchers()
+QDEBUG : TasksModelTest::test_intraGroupMove() === initial rowCount= 3
+QDEBUG : TasksModelTest::test_intraGroupMove() 0 "GRWIN_A" isGroupParent= false childCount= 0
+QDEBUG : TasksModelTest::test_intraGroupMove() 1 "GRWIN_B" isGroupParent= false childCount= 0
+QDEBUG : TasksModelTest::test_intraGroupMove() 2 "GRWIN_C" isGroupParent= false childCount= 0
+QDEBUG : TasksModelTest::test_intraGroupMove() BEFORE order: QList("GRWIN_A", "GRWIN_B", "GRWIN_C")
+QDEBUG : TasksModelTest::test_intraGroupMove() move(mid->front) returned true -> order QList("GRWIN_B", "GRWIN_A", "GRWIN_C")
+QDEBUG : TasksModelTest::test_intraGroupMove() kill-switch OFF: move returned false order QList("GRWIN_B", "GRWIN_A", "GRWIN_C") -> QList("GRWIN_B", "GRWIN_A", "GRWIN_C")
+PASS   : TasksModelTest::test_intraGroupMove()
+PASS   : TasksModelTest::cleanupTestCase()
+Totals: 6 passed, 0 failed, 0 skipped, 0 blacklisted, 1339ms
+********* Finished testing of TasksModelTest *********
+TESTRC=0

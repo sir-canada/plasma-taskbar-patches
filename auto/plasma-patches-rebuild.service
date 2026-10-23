@@ -1,0 +1,18 @@
+[Unit]
+Description=Re-apply Plasma taskbar/tray patches if pacman reverted them
+Documentation=file:///home/x/Documents/projects/plasma-taskbar-patches/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/plasma-patches-auto
+# Three KDE targets can take several minutes on a slow box; the build waits for
+# pacman to release its lock first, so this ceiling is generous on purpose.
+TimeoutStartSec=3600
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target
